@@ -11,8 +11,15 @@ VPS端：![image](https://github.com/user-attachments/assets/c0d92ab4-7e9f-4f57-
 
 # 使用方法：
 1. 把worker.js 里的代码复制到cf worker 里部署。
-2. 创建3个kv存储并绑定到worker。分别是：AUTH_STORE  SERVERS_STORE  METRICS_STORE
-3. 部署完毕就可以打开worker链接登录账号，默认账号密码：admin admin, 添加vps，获得vps ID和密钥。
-4. 把 enhanced-install.sh 脚本上传到被控vps，并给脚本权限，按照提示安装即可。
-5. 注意worker每日10万次额度
+2. 创建3个kv存储并绑定到worker。分别是：
+
+    AUTH_STORE
+
+    SERVERS_STORE
+
+    METRICS_STORE
+   
+5. 部署完毕就可以打开worker链接登录账号，默认账号密码：admin admin, 添加vps，获得vps ID和密钥。
+6. 把 enhanced-install.sh 脚本上传到被控vps，并给脚本权限，按照提示安装即可。
+7. 注意worker每日10万次额度
 ## 本人不懂代码，所有代码都是AI写的，有问题也别问我，去问AI还更快。
