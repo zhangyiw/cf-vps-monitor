@@ -22,4 +22,5 @@ VPS端：![image](https://github.com/user-attachments/assets/c0d92ab4-7e9f-4f57-
 5. 部署完毕就可以打开worker链接登录账号，默认账号密码：admin admin, 添加vps，获得vps ID和密钥。
 6. 把 enhanced-install.sh 脚本上传到被控vps，并给脚本权限，按照提示安装即可。
 7. 注意worker每日10万次额度
-## 本人不懂代码，所有代码都是AI写的，有问题也别问我，去问AI还更快。
+## 本人不懂代码，只是爱好折腾，所有代码都是AI写的，有问题也别问我，去问AI还更快。
+## 我只提供一下思路，如果又更好的方案请务必@一下我，我去给你star！
