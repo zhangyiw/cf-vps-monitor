@@ -11,7 +11,7 @@ VPS端：![image](https://github.com/user-attachments/assets/c0d92ab4-7e9f-4f57-
 
 # 使用方法：
 1. 把worker.js 里的代码复制到cf worker 里部署。
-2. 创建3个kv存储并绑定到worker。分别是：
+2. 创建3个kv命名空间并绑定到worker。分别是：
 
     AUTH_STORE
 
