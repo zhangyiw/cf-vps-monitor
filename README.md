@@ -19,6 +19,14 @@ VPS端：![image](https://github.com/user-attachments/assets/c0d92ab4-7e9f-4f57-
 
     METRICS_STORE
    
+   到KV存储和数据库创建3个命名空间
+   ![image](https://github.com/user-attachments/assets/3ddb0ea4-9971-436e-98bf-ca5342ff0c3c)
+   
+   都绑定到worker
+   ![image](https://github.com/user-attachments/assets/006f3ae8-ef86-4b3c-9107-c0275be3e9af)
+
+
+   
 5. 部署完毕就可以打开worker链接登录账号，默认账号密码：admin admin, 添加vps，获得vps ID和密钥。
 6. 把 enhanced-install.sh 脚本上传到被控vps，并给脚本权限，按照提示安装即可。
 7. 注意worker每日10万次额度
