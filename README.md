@@ -1,5 +1,5 @@
 # cf-vps-monitor
-## 用cloudflare worker搭建的vps探针简易面板
+## 用cloudflare worker搭建的vps探针简易面板（所有内容和代码均为AI生成）
 面板示例：https://vps-monitor.abo-vendor289.workers.dev/
 
 前端：![image](https://github.com/user-attachments/assets/9f082014-e32d-484f-b954-db652d7bd275)
