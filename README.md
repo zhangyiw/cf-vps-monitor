@@ -144,4 +144,4 @@ curl -O https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/enhanced
 
 *   **Worker 和 D1 每日配额:** Cloudflare Worker 和 D1 免费额度有限。详情请查阅 Cloudflare 文档。
 *   **安全性:** 默认密码 `admin` 非常不安全，请务必在首次登录后设法修改。Agent 使用的 API 密钥也应妥善保管。
-*   **错误处理:** 如果面板或 Agent 遇到问题，可以检查 Worker 的日志（在 Cloudflare 控制面板 Worker 页面）和 Agent 的日志（使用 `sudo ./enhanced-install.sh log`）。
+*   **错误处理:** 如果面板或 Agent 遇到问题，可以检查 Worker 的日志（在 Cloudflare 控制面板 Worker 页面）和 Agent 的日志。
