@@ -133,12 +133,12 @@ curl -O https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/enhanced
 
 安装脚本本身也提供了管理功能：
 
-*   **启动服务:** `sudo ./probe-agent-install.sh start`
-*   **停止服务:** `sudo ./probe-agent-install.sh stop`
-*   **重启服务:** `sudo ./probe-agent-install.sh restart`
-*   **查看状态:** `sudo ./probe-agent-install.sh status`
-*   **查看日志:** `sudo ./probe-agent-install.sh log`
-*   **卸载服务:** `sudo ./probe-agent-install.sh uninstall`
+*   **启动服务:** 
+*   **停止服务:** 
+*   **重启服务:** 
+*   **查看状态:** 
+*   **查看日志:** 
+*   **卸载服务:** 
 
 ## 注意事项
 
