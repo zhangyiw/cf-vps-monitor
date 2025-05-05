@@ -46,39 +46,59 @@ async function handleApiRequest(request, env) {
   if (path === '/api/auth/login' && method === 'POST') {
     try {
       const { username, password } = await request.json();
-      
-      // 从KV获取管理员凭证
-      let adminCredentials = await env.AUTH_STORE.get('admin_credentials', { type: 'json' });
-      
-      // 如果没有管理员凭证，使用默认凭证
-      if (!adminCredentials) {
-        // 默认凭证: admin/admin
-        adminCredentials = {
-          username: 'admin',
-          password: 'admin'  // 简化版本，不使用哈希
-        };
-        
-        // 保存默认凭证到KV
-        await env.AUTH_STORE.put('admin_credentials', JSON.stringify(adminCredentials));
+
+      // 从D1获取管理员凭证
+      let stmt = env.DB.prepare('SELECT password FROM admin_credentials WHERE username = ?');
+      let result = await stmt.bind(username).first();
+
+      let storedPassword = null;
+      if (result) {
+        storedPassword = result.password;
+      } else if (username === 'admin') {
+        // 如果是首次登录且用户是 'admin'，创建默认凭证
+        const defaultPassword = 'admin'; // 简化版本，不使用哈希
+        try {
+          // 使用 INSERT OR IGNORE 避免并发问题
+          await env.DB.prepare('INSERT OR IGNORE INTO admin_credentials (username, password) VALUES (?, ?)')
+                      .bind('admin', defaultPassword)
+                      .run();
+          storedPassword = defaultPassword;
+        } catch (dbError) {
+           // 如果表不存在，尝试创建表并插入 (仅适用于开发或首次部署)
+           // 注意：在生产环境中，表结构应预先创建好
+           if (dbError.message.includes('no such table')) {
+             console.warn("Admin credentials table not found. Attempting to create...");
+             await env.DB.exec(`
+               CREATE TABLE IF NOT EXISTS admin_credentials (
+                 username TEXT PRIMARY KEY,
+                 password TEXT NOT NULL
+               );
+               INSERT OR IGNORE INTO admin_credentials (username, password) VALUES ('admin', 'admin');
+             `);
+             storedPassword = defaultPassword; // 假设创建成功
+           } else {
+             throw dbError; // 重新抛出其他数据库错误
+           }
+        }
       }
-      
-      // 验证用户名和密码
-      if (username === adminCredentials.username && password === adminCredentials.password) {
+
+      // 验证密码
+      if (storedPassword && password === storedPassword) {
         // 生成简单token
         const token = btoa(username + ':' + Date.now());
-        
         return new Response(JSON.stringify({ token }), {
           headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       }
-      
+
       // 验证失败
       return new Response(JSON.stringify({ error: 'Invalid credentials', message: '用户名或密码错误' }), {
         status: 401,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
-      return new Response(JSON.stringify({ error: error.message }), {
+      console.error("Login error:", error);
+      return new Response(JSON.stringify({ error: 'Internal server error', message: error.message }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
@@ -95,58 +115,132 @@ async function handleApiRequest(request, env) {
     });
   }
   
-  // 处理获取服务器列表
+  // 处理获取服务器列表 (Public)
   if (path === '/api/servers' && method === 'GET') {
     try {
-      // 从KV获取服务器列表
-      const serversList = await env.SERVERS_STORE.get('servers_list', { type: 'json' }) || { servers: [] };
+      // 从D1获取服务器列表 (只选择id和name)
+      const stmt = env.DB.prepare('SELECT id, name, description FROM servers ORDER BY name');
+      const { results } = await stmt.all();
       
-      return new Response(JSON.stringify(serversList), {
+      return new Response(JSON.stringify({ servers: results || [] }), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
-      return new Response(JSON.stringify({ error: error.message }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+       console.error("Get servers error:", error);
+       // 尝试创建表 (仅适用于开发或首次部署)
+       if (error.message.includes('no such table')) {
+         console.warn("Servers table not found. Returning empty list and attempting to create...");
+         try {
+           await env.DB.exec(`
+             CREATE TABLE IF NOT EXISTS servers (
+               id TEXT PRIMARY KEY,
+               name TEXT NOT NULL,
+               description TEXT,
+               api_key TEXT NOT NULL UNIQUE,
+               created_at INTEGER NOT NULL
+             );
+           `);
+           return new Response(JSON.stringify({ servers: [] }), { // 返回空列表
+             headers: { 'Content-Type': 'application/json', ...corsHeaders }
+           });
+         } catch (createError) {
+            console.error("Failed to create servers table:", createError);
+            return new Response(JSON.stringify({ error: 'Database error', message: createError.message }), {
+              status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+            });
+         }
+       }
+       return new Response(JSON.stringify({ error: 'Internal server error', message: error.message }), {
+         status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+       });
     }
   }
   
-  // 处理获取服务器状态
+  // 处理获取服务器状态 (Public)
   if (path.startsWith('/api/status/') && method === 'GET') {
     try {
       const serverId = path.split('/').pop();
-      
-      // 从KV获取服务器信息
-      const serverKey = `server:${serverId}`;
-      const serverData = await env.SERVERS_STORE.get(serverKey, { type: 'json' });
-      
+
+      // 从D1获取服务器信息
+      const serverStmt = env.DB.prepare('SELECT id, name, description FROM servers WHERE id = ?');
+      const serverData = await serverStmt.bind(serverId).first();
+
       if (!serverData) {
         return new Response(JSON.stringify({ error: 'Server not found' }), {
           status: 404,
           headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       }
-      
-      // 从KV获取最新监控数据
-      const metricsKey = `metrics:${serverId}:latest`;
-      const metricsData = await env.METRICS_STORE.get(metricsKey, { type: 'json' });
-      
+
+      // 从D1获取最新监控数据
+      // 注意：metrics表存储JSON字符串，直接取出
+      const metricsStmt = env.DB.prepare('SELECT timestamp, cpu, memory, disk, network FROM metrics WHERE server_id = ?');
+      const metricsResult = await metricsStmt.bind(serverId).first();
+
+      let metricsData = null;
+      if (metricsResult) {
+         // 解析存储的JSON字符串
+         try {
+            metricsData = {
+                timestamp: metricsResult.timestamp,
+                cpu: JSON.parse(metricsResult.cpu || '{}'),
+                memory: JSON.parse(metricsResult.memory || '{}'),
+                disk: JSON.parse(metricsResult.disk || '{}'),
+                network: JSON.parse(metricsResult.network || '{}')
+            };
+         } catch (parseError) {
+             console.error(`Error parsing metrics JSON for server ${serverId}:`, parseError);
+             // 可以选择返回错误或返回部分数据
+             metricsData = { timestamp: metricsResult.timestamp }; // 至少返回时间戳
+         }
+      }
+
+
       // 准备响应数据
       const responseData = {
-        server: {
-          id: serverData.id,
-          name: serverData.name,
-          description: serverData.description
-        },
-        metrics: metricsData || null
+        server: serverData, // 包含 id, name, description
+        metrics: metricsData
       };
-      
+
       return new Response(JSON.stringify(responseData), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
-      return new Response(JSON.stringify({ error: error.message }), {
+      console.error("Get status error:", error);
+       // 尝试创建表 (仅适用于开发或首次部署)
+       if (error.message.includes('no such table')) {
+         console.warn("Servers or metrics table not found. Attempting to create...");
+         try {
+           await env.DB.exec(`
+             CREATE TABLE IF NOT EXISTS servers (
+               id TEXT PRIMARY KEY,
+               name TEXT NOT NULL,
+               description TEXT,
+               api_key TEXT NOT NULL UNIQUE,
+               created_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS metrics (
+               server_id TEXT PRIMARY KEY,
+               timestamp INTEGER,
+               cpu TEXT,
+               memory TEXT,
+               disk TEXT,
+               network TEXT,
+               FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+             );
+           `);
+           // 返回 404 因为即使创建了表，数据也不存在
+            return new Response(JSON.stringify({ error: 'Server not found (tables created)' }), {
+              status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+            });
+         } catch (createError) {
+            console.error("Failed to create tables:", createError);
+            return new Response(JSON.stringify({ error: 'Database error', message: createError.message }), {
+              status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+            });
+         }
+       }
+      return new Response(JSON.stringify({ error: 'Internal server error', message: error.message }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
@@ -156,30 +250,55 @@ async function handleApiRequest(request, env) {
   // 处理管理API - 获取所有服务器
   if (path === '/api/admin/servers' && method === 'GET') {
     try {
-      // 从KV获取服务器列表
-      const serversList = await env.SERVERS_STORE.get('servers_list', { type: 'json' }) || { servers: [] };
+      // 从D1获取所有服务器及其最新指标时间戳
+      // 使用 LEFT JOIN 来包含没有指标的服务器
+      const stmt = env.DB.prepare(`
+        SELECT 
+          s.id, s.name, s.description, s.created_at, m.timestamp as last_report 
+        FROM servers s 
+        LEFT JOIN metrics m ON s.id = m.server_id 
+        ORDER BY s.name
+      `);
+      const { results } = await stmt.all();
       
-      // 获取每个服务器的详细信息
-      const serversWithDetails = await Promise.all(serversList.servers.map(async server => {
-        const serverKey = `server:${server.id}`;
-        const serverData = await env.SERVERS_STORE.get(serverKey, { type: 'json' });
-        
-        // 获取最新监控数据的时间戳
-        const metricsKey = `metrics:${server.id}:latest`;
-        const metricsData = await env.METRICS_STORE.get(metricsKey, { type: 'json' });
-        
-        return {
-          ...serverData,
-          api_key: undefined, // 不返回API密钥
-          last_report: metricsData ? metricsData.timestamp : null
-        };
-      }));
-      
-      return new Response(JSON.stringify({ servers: serversWithDetails }), {
+      return new Response(JSON.stringify({ servers: results || [] }), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
-      return new Response(JSON.stringify({ error: error.message }), {
+      console.error("Admin get servers error:", error);
+      // 尝试创建表 (仅适用于开发或首次部署)
+       if (error.message.includes('no such table')) {
+         console.warn("Servers or metrics table not found. Returning empty list and attempting to create...");
+         try {
+           await env.DB.exec(`
+             CREATE TABLE IF NOT EXISTS servers (
+               id TEXT PRIMARY KEY,
+               name TEXT NOT NULL,
+               description TEXT,
+               api_key TEXT NOT NULL UNIQUE,
+               created_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS metrics (
+               server_id TEXT PRIMARY KEY,
+               timestamp INTEGER,
+               cpu TEXT,
+               memory TEXT,
+               disk TEXT,
+               network TEXT,
+               FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+             );
+           `);
+           return new Response(JSON.stringify({ servers: [] }), { // 返回空列表
+             headers: { 'Content-Type': 'application/json', ...corsHeaders }
+           });
+         } catch (createError) {
+            console.error("Failed to create tables:", createError);
+            return new Response(JSON.stringify({ error: 'Database error', message: createError.message }), {
+              status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+            });
+         }
+       }
+      return new Response(JSON.stringify({ error: 'Internal server error', message: error.message }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
@@ -190,7 +309,7 @@ async function handleApiRequest(request, env) {
   if (path === '/api/admin/servers' && method === 'POST') {
     try {
       const { name, description } = await request.json();
-      
+
       // 验证输入
       if (!name) {
         return new Response(JSON.stringify({ error: 'Server name is required' }), {
@@ -198,40 +317,64 @@ async function handleApiRequest(request, env) {
           headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       }
-      
+
       // 生成服务器ID和API密钥
       const serverId = Math.random().toString(36).substring(2, 10);
-      const apiKey = Math.random().toString(36).substring(2, 15) + 
+      const apiKey = Math.random().toString(36).substring(2, 15) +
                      Math.random().toString(36).substring(2, 15);
-      
-      // 创建服务器对象
+      const createdAt = Math.floor(Date.now() / 1000);
+
+      // 保存服务器数据到D1
+      const stmt = env.DB.prepare(
+        'INSERT INTO servers (id, name, description, api_key, created_at) VALUES (?, ?, ?, ?, ?)'
+      );
+      await stmt.bind(serverId, name, description || '', apiKey, createdAt).run();
+
+      // 返回服务器数据（包含API密钥）
       const serverData = {
         id: serverId,
         name,
         description: description || '',
-        api_key: apiKey,
-        created_at: Math.floor(Date.now() / 1000)
+        api_key: apiKey, // 返回密钥给管理员
+        created_at: createdAt
       };
-      
-      // 保存服务器数据到KV
-      const serverKey = `server:${serverId}`;
-      await env.SERVERS_STORE.put(serverKey, JSON.stringify(serverData));
-      
-      // 更新服务器列表
-      const serversList = await env.SERVERS_STORE.get('servers_list', { type: 'json' }) || { servers: [] };
-      serversList.servers.push({
-        id: serverId,
-        name,
-        description: description || ''
-      });
-      await env.SERVERS_STORE.put('servers_list', JSON.stringify(serversList));
-      
-      // 返回服务器数据（包含API密钥）
+
       return new Response(JSON.stringify({ server: serverData }), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
-      return new Response(JSON.stringify({ error: error.message }), {
+      console.error("Admin add server error:", error);
+      // 检查是否因为 UNIQUE constraint 失败 (不太可能，但以防万一)
+      if (error.message.includes('UNIQUE constraint failed')) {
+         return new Response(JSON.stringify({ error: 'Server ID or API Key conflict', message: '服务器ID或API密钥冲突，请重试' }), {
+           status: 409, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+         });
+      }
+      // 尝试创建表 (仅适用于开发或首次部署)
+       if (error.message.includes('no such table')) {
+         console.warn("Servers table not found. Attempting to create...");
+         try {
+           await env.DB.exec(`
+             CREATE TABLE IF NOT EXISTS servers (
+               id TEXT PRIMARY KEY,
+               name TEXT NOT NULL,
+               description TEXT,
+               api_key TEXT NOT NULL UNIQUE,
+               created_at INTEGER NOT NULL
+             );
+           `);
+           // 提示用户重试，因为表刚创建
+            return new Response(JSON.stringify({ error: 'Database table created, please retry', message: '数据库表已创建，请重试添加操作' }), {
+              status: 503, headers: { 'Content-Type': 'application/json', ...corsHeaders } // Service Unavailable
+            });
+         } catch (createError) {
+            console.error("Failed to create servers table:", createError);
+            return new Response(JSON.stringify({ error: 'Database error', message: createError.message }), {
+              status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+            });
+         }
+       }
+      return new Response(JSON.stringify({ error: 'Internal server error', message: error.message }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
@@ -242,36 +385,24 @@ async function handleApiRequest(request, env) {
   if (path.match(/\/api\/admin\/servers\/[^\/]+$/) && method === 'DELETE') {
     try {
       const serverId = path.split('/').pop();
-      
-      // 从KV获取服务器列表
-      const serversList = await env.SERVERS_STORE.get('servers_list', { type: 'json' }) || { servers: [] };
-      
-      // 检查服务器是否存在
-      const serverIndex = serversList.servers.findIndex(s => s.id === serverId);
-      if (serverIndex === -1) {
+
+      // D1 外键约束 (ON DELETE CASCADE) 会自动删除关联的 metrics 数据
+      const stmt = env.DB.prepare('DELETE FROM servers WHERE id = ?');
+      const info = await stmt.bind(serverId).run();
+
+      if (info.changes === 0) {
         return new Response(JSON.stringify({ error: 'Server not found' }), {
           status: 404,
           headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       }
-      
-      // 从列表中删除服务器
-      serversList.servers.splice(serverIndex, 1);
-      await env.SERVERS_STORE.put('servers_list', JSON.stringify(serversList));
-      
-      // 删除服务器数据
-      const serverKey = `server:${serverId}`;
-      await env.SERVERS_STORE.delete(serverKey);
-      
-      // 删除监控数据
-      const metricsKey = `metrics:${serverId}:latest`;
-      await env.METRICS_STORE.delete(metricsKey);
-      
+
       return new Response(JSON.stringify({ success: true }), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
-      return new Response(JSON.stringify({ error: error.message }), {
+      console.error("Admin delete server error:", error);
+      return new Response(JSON.stringify({ error: 'Internal server error', message: error.message }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
@@ -283,7 +414,7 @@ async function handleApiRequest(request, env) {
     try {
       const serverId = path.split('/').pop();
       const { name, description } = await request.json();
-      
+
       // 验证输入
       if (!name) {
         return new Response(JSON.stringify({ error: 'Server name is required' }), {
@@ -291,37 +422,26 @@ async function handleApiRequest(request, env) {
           headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       }
-      
-      // 从KV获取服务器数据
-      const serverKey = `server:${serverId}`;
-      const serverData = await env.SERVERS_STORE.get(serverKey, { type: 'json' });
-      
-      if (!serverData) {
+
+      // 更新D1中的服务器数据
+      const stmt = env.DB.prepare(
+        'UPDATE servers SET name = ?, description = ? WHERE id = ?'
+      );
+      const info = await stmt.bind(name, description || '', serverId).run();
+
+      if (info.changes === 0) {
         return new Response(JSON.stringify({ error: 'Server not found' }), {
           status: 404,
           headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       }
-      
-      // 更新服务器数据
-      serverData.name = name;
-      serverData.description = description || '';
-      await env.SERVERS_STORE.put(serverKey, JSON.stringify(serverData));
-      
-      // 更新服务器列表
-      const serversList = await env.SERVERS_STORE.get('servers_list', { type: 'json' }) || { servers: [] };
-      const serverIndex = serversList.servers.findIndex(s => s.id === serverId);
-      if (serverIndex !== -1) {
-        serversList.servers[serverIndex].name = name;
-        serversList.servers[serverIndex].description = description || '';
-        await env.SERVERS_STORE.put('servers_list', JSON.stringify(serversList));
-      }
-      
+
       return new Response(JSON.stringify({ success: true }), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
-      return new Response(JSON.stringify({ error: error.message }), {
+      console.error("Admin update server error:", error);
+      return new Response(JSON.stringify({ error: 'Internal server error', message: error.message }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
@@ -333,35 +453,36 @@ async function handleApiRequest(request, env) {
     try {
       const serverId = path.split('/').pop();
       const apiKey = request.headers.get('X-API-Key');
-      
+
       if (!apiKey) {
         return new Response(JSON.stringify({ error: 'API key required' }), {
           status: 401,
           headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       }
-      
-      // 从KV获取服务器数据
-      const serverKey = `server:${serverId}`;
-      const serverData = await env.SERVERS_STORE.get(serverKey, { type: 'json' });
-      
+
+      // 从D1获取服务器API密钥
+      const serverStmt = env.DB.prepare('SELECT api_key FROM servers WHERE id = ?');
+      const serverData = await serverStmt.bind(serverId).first();
+
       if (!serverData) {
         return new Response(JSON.stringify({ error: 'Server not found' }), {
           status: 404,
           headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       }
-      
+
+      // 验证API密钥
       if (serverData.api_key !== apiKey) {
         return new Response(JSON.stringify({ error: 'Invalid API key' }), {
           status: 401,
           headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       }
-      
+
       // 解析上报的数据
       const reportData = await request.json();
-      
+
       // 验证数据格式
       if (!reportData.timestamp || !reportData.cpu || !reportData.memory || !reportData.disk || !reportData.network) {
         return new Response(JSON.stringify({ error: 'Invalid data format' }), {
@@ -369,16 +490,61 @@ async function handleApiRequest(request, env) {
           headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       }
-      
-      // 保存监控数据到KV
-      const metricsKey = `metrics:${serverId}:latest`;
-      await env.METRICS_STORE.put(metricsKey, JSON.stringify(reportData));
-      
+
+      // 保存监控数据到D1 (使用REPLACE INTO进行插入或更新)
+      // 将复杂的对象字符串化存储
+      const metricsStmt = env.DB.prepare(`
+        REPLACE INTO metrics (server_id, timestamp, cpu, memory, disk, network) 
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      await metricsStmt.bind(
+        serverId,
+        reportData.timestamp,
+        JSON.stringify(reportData.cpu),
+        JSON.stringify(reportData.memory),
+        JSON.stringify(reportData.disk),
+        JSON.stringify(reportData.network)
+      ).run();
+
       return new Response(JSON.stringify({ success: true }), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
-      return new Response(JSON.stringify({ error: error.message }), {
+      console.error("Report API error:", error);
+       // 尝试创建表 (仅适用于开发或首次部署)
+       if (error.message.includes('no such table')) {
+         console.warn("Servers or metrics table not found. Attempting to create...");
+         try {
+           await env.DB.exec(`
+             CREATE TABLE IF NOT EXISTS servers (
+               id TEXT PRIMARY KEY,
+               name TEXT NOT NULL,
+               description TEXT,
+               api_key TEXT NOT NULL UNIQUE,
+               created_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS metrics (
+               server_id TEXT PRIMARY KEY,
+               timestamp INTEGER,
+               cpu TEXT,
+               memory TEXT,
+               disk TEXT,
+               network TEXT,
+               FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+             );
+           `);
+           // 提示需要重试，因为表刚创建，或者服务器可能不存在
+            return new Response(JSON.stringify({ error: 'Database table created or server not found, please retry or verify server ID/API Key', message: '数据库表已创建或服务器不存在，请重试或验证服务器ID/API密钥' }), {
+              status: 503, headers: { 'Content-Type': 'application/json', ...corsHeaders } // Service Unavailable
+            });
+         } catch (createError) {
+            console.error("Failed to create tables:", createError);
+            return new Response(JSON.stringify({ error: 'Database error', message: createError.message }), {
+              status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+            });
+         }
+       }
+      return new Response(JSON.stringify({ error: 'Internal server error', message: error.message }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
@@ -386,26 +552,27 @@ async function handleApiRequest(request, env) {
   }
   
   // 处理管理API - 获取服务器的API密钥
-  if (path.match(/\/api\/admin\/servers\/[^\/]+\/key/) && method === 'GET') {
+  if (path.match(/\/api\/admin\/servers\/[^\/]+\/key$/) && method === 'GET') {
     try {
-      const serverId = path.split('/')[4];
-      
-      // 从KV获取服务器数据
-      const serverKey = `server:${serverId}`;
-      const serverData = await env.SERVERS_STORE.get(serverKey, { type: 'json' });
-      
-      if (!serverData) {
+      const serverId = path.split('/')[4]; // 获取路径中的 serverId
+
+      // 从D1获取API密钥
+      const stmt = env.DB.prepare('SELECT api_key FROM servers WHERE id = ?');
+      const result = await stmt.bind(serverId).first();
+
+      if (!result) {
         return new Response(JSON.stringify({ error: 'Server not found' }), {
           status: 404,
           headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       }
-      
-      return new Response(JSON.stringify({ api_key: serverData.api_key }), {
+
+      return new Response(JSON.stringify({ api_key: result.api_key }), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
-      return new Response(JSON.stringify({ error: error.message }), {
+      console.error("Admin get API key error:", error);
+      return new Response(JSON.stringify({ error: 'Internal server error', message: error.message }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
@@ -415,8 +582,10 @@ async function handleApiRequest(request, env) {
   // 处理密码修改API
   if (path === '/api/auth/change-password' && method === 'POST') {
     try {
+      // 假设只有一个管理员 'admin'
+      const adminUsername = 'admin';
       const { current_password, new_password } = await request.json();
-      
+
       // 验证输入
       if (!current_password || !new_password) {
         return new Response(JSON.stringify({ error: 'Current password and new password are required' }), {
@@ -424,35 +593,36 @@ async function handleApiRequest(request, env) {
           headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       }
-      
-      // 从KV获取管理员凭证
-      let adminCredentials = await env.AUTH_STORE.get('admin_credentials', { type: 'json' });
-      
-      // 如果没有管理员凭证，使用默认凭证
-      if (!adminCredentials) {
-        adminCredentials = {
-          username: 'admin',
-          password: 'admin'
-        };
+
+      // 从D1获取当前密码
+      let stmt = env.DB.prepare('SELECT password FROM admin_credentials WHERE username = ?');
+      let result = await stmt.bind(adminUsername).first();
+
+      if (!result) {
+         return new Response(JSON.stringify({ error: 'Admin user not found', message: '管理员用户不存在' }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        });
       }
-      
+
       // 验证当前密码
-      if (adminCredentials.password !== current_password) {
+      if (result.password !== current_password) {
         return new Response(JSON.stringify({ error: 'Current password is incorrect', message: '当前密码不正确' }), {
           status: 400,
           headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       }
-      
+
       // 更新密码
-      adminCredentials.password = new_password;
-      await env.AUTH_STORE.put('admin_credentials', JSON.stringify(adminCredentials));
-      
+      stmt = env.DB.prepare('UPDATE admin_credentials SET password = ? WHERE username = ?');
+      await stmt.bind(new_password, adminUsername).run();
+
       return new Response(JSON.stringify({ success: true }), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
-      return new Response(JSON.stringify({ error: error.message }), {
+      console.error("Change password error:", error);
+      return new Response(JSON.stringify({ error: 'Internal server error', message: error.message }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
@@ -770,7 +940,6 @@ function getIndexHtml() {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.1/font/bootstrap-icons.css" rel="stylesheet">
     <link href="/css/style.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.1/dist/chart.min.js"></script>
 </head>
 <body>
     <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
@@ -780,17 +949,7 @@ function getIndexHtml() {
                 <span class="navbar-toggler-icon"></span>
             </button>
             <div class="collapse navbar-collapse" id="navbarNav">
-                <ul class="navbar-nav me-auto">
-                    <li class="nav-item dropdown">
-                        <a class="nav-link dropdown-toggle" href="#" id="serverSelector" role="button" data-bs-toggle="dropdown">
-                            选择服务器
-                        </a>
-                        <ul class="dropdown-menu" id="serverList">
-                            <li><a class="dropdown-item" href="#">加载中...</a></li>
-                        </ul>
-                    </li>
-                </ul>
-                <ul class="navbar-nav">
+                <ul class="navbar-nav ms-auto">
                     <li class="nav-item">
                         <a class="nav-link" href="/login.html">管理员登录</a>
                     </li>
@@ -800,150 +959,32 @@ function getIndexHtml() {
     </nav>
 
     <div class="container mt-4">
-        <div id="noServers" class="alert alert-info">
+        <div id="noServers" class="alert alert-info d-none">
             暂无服务器数据，请先登录管理后台添加服务器。
         </div>
 
-        <div id="serverData" class="d-none">
-            <div class="row mb-4">
-                <div class="col-md-6">
-                    <div class="card">
-                        <div class="card-header">
-                            <h5 class="card-title mb-0">服务器信息</h5>
-                        </div>
-                        <div class="card-body">
-                            <div class="d-flex justify-content-between mb-3">
-                                <div>
-                                    <h4 id="serverName">服务器名称</h4>
-                                    <p id="serverDescription" class="text-muted">服务器描述</p>
-                                </div>
-                                <div>
-                                    <span id="serverStatus" class="badge bg-secondary">未知</span>
-                                </div>
-                            </div>
-                            <p class="mb-0">最后更新: <span id="lastUpdate">-</span></p>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-md-6">
-                    <div class="card">
-                        <div class="card-header">
-                            <h5 class="card-title mb-0">网络状态</h5>
-                        </div>
-                        <div class="card-body">
-                            <div class="row">
-                                <div class="col-6">
-                                    <div class="mb-3">
-                                        <label class="form-label">上传速度</label>
-                                        <h4 id="uploadSpeed">0 B/s</h4>
-                                    </div>
-                                    <div>
-                                        <label class="form-label">总上传流量</label>
-                                        <h4 id="totalUpload">0 B</h4>
-                                    </div>
-                                </div>
-                                <div class="col-6">
-                                    <div class="mb-3">
-                                        <label class="form-label">下载速度</label>
-                                        <h4 id="downloadSpeed">0 B/s</h4>
-                                    </div>
-                                    <div>
-                                        <label class="form-label">总下载流量</label>
-                                        <h4 id="totalDownload">0 B</h4>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="row mb-4">
-                <div class="col-md-4">
-                    <div class="card">
-                        <div class="card-header">
-                            <h5 class="card-title mb-0">CPU使用率</h5>
-                        </div>
-                        <div class="card-body">
-                            <h2 id="cpuUsage" class="text-center mb-3">0%</h2>
-                            <div class="progress">
-                                <div id="cpuProgressBar" class="progress-bar" role="progressbar" style="width: 0%"></div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-md-4">
-                    <div class="card">
-                        <div class="card-header">
-                            <h5 class="card-title mb-0">内存使用率</h5>
-                        </div>
-                        <div class="card-body">
-                            <h2 id="memoryUsage" class="text-center mb-3">0%</h2>
-                            <div class="progress mb-3">
-                                <div id="memoryProgressBar" class="progress-bar bg-success" role="progressbar" style="width: 0%"></div>
-                            </div>
-                            <div class="text-center">
-                                <span id="memoryUsedValue">0</span> MB / <span id="memoryTotalValue">0</span> MB
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-md-4">
-                    <div class="card">
-                        <div class="card-header">
-                            <h5 class="card-title mb-0">硬盘使用率</h5>
-                        </div>
-                        <div class="card-body">
-                            <h2 id="diskUsage" class="text-center mb-3">0%</h2>
-                            <div class="progress mb-3">
-                                <div id="diskProgressBar" class="progress-bar bg-info" role="progressbar" style="width: 0%"></div>
-                            </div>
-                            <div class="text-center">
-                                <span id="diskUsedValue">0</span> GB / <span id="diskTotalValue">0</span> GB
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="row">
-                <div class="col-md-4">
-                    <div class="card">
-                        <div class="card-header">
-                            <h5 class="card-title mb-0">CPU历史</h5>
-                        </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="cpuChart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-md-4">
-                    <div class="card">
-                        <div class="card-header">
-                            <h5 class="card-title mb-0">内存历史</h5>
-                        </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="memoryChart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-md-4">
-                    <div class="card">
-                        <div class="card-header">
-                            <h5 class="card-title mb-0">网络历史</h5>
-                        </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="networkChart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
+        <div class="table-responsive">
+            <table class="table table-striped table-hover align-middle">
+                <thead>
+                    <tr>
+                        <th>名称</th>
+                        <th>状态</th>
+                        <th>CPU</th>
+                        <th>内存</th>
+                        <th>硬盘</th>
+                        <th>上传</th>
+                        <th>下载</th>
+                        <th>总上传</th>
+                        <th>总下载</th>
+                        <th>最后更新</th>
+                    </tr>
+                </thead>
+                <tbody id="serverTableBody">
+                    <tr>
+                        <td colspan="10" class="text-center">加载中...</td>
+                    </tr>
+                </tbody>
+            </table>
         </div>
     </div>
 
@@ -1251,6 +1292,11 @@ body {
     .chart-container {
         height: 150px;
     }
+}
+
+/* 自定义浅绿色进度条 */
+.bg-light-green {
+    background-color: #90ee90 !important; /* LightGreen */
 }`;
 }
 
@@ -1258,348 +1304,164 @@ function getMainJs() {
   return `// main.js - 首页面的JavaScript逻辑
 
 // 全局变量
-let currentServerId = null;
-let cpuChart = null;
-let memoryChart = null;
-let networkChart = null;
-let cpuData = [];
-let memoryData = [];
-let networkData = [];
 let updateInterval = null;
+let serverDataCache = {}; // 用于缓存服务器数据，减少重复渲染
 
 // 页面加载完成后执行
 document.addEventListener('DOMContentLoaded', function() {
-    // 初始化服务器列表
-    fetchServersList();
-    
-    // 设置服务器选择器的事件监听
-    document.getElementById('serverList').addEventListener('click', function(e) {
-        if (e.target.classList.contains('dropdown-item')) {
-            const serverId = e.target.getAttribute('data-id');
-            const serverName = e.target.textContent;
-            selectServer(serverId, serverName);
-        }
-    });
-});
-
-// 获取服务器列表
-async function fetchServersList() {
-    try {
-        const response = await fetch('/api/servers');
-        if (!response.ok) {
-            throw new Error('获取服务器列表失败');
-        }
-        
-        const data = await response.json();
-        const serverList = document.getElementById('serverList');
-        serverList.innerHTML = '';
-        
-        if (data.servers && data.servers.length > 0) {
-            data.servers.forEach(server => {
-                const item = document.createElement('li');
-                const link = document.createElement('a');
-                link.classList.add('dropdown-item');
-                link.setAttribute('data-id', server.id);
-                link.textContent = server.name;
-                item.appendChild(link);
-                serverList.appendChild(item);
-            });
-            
-            // 默认选择第一个服务器
-            selectServer(data.servers[0].id, data.servers[0].name);
-        } else {
-            // 没有服务器数据
-            document.getElementById('serverSelector').textContent = '无服务器数据';
-            document.getElementById('noServers').classList.remove('d-none');
-            document.getElementById('serverData').classList.add('d-none');
-        }
-    } catch (error) {
-        console.error('获取服务器列表错误:', error);
-        document.getElementById('serverSelector').textContent = '加载失败';
-        document.getElementById('noServers').classList.remove('d-none');
-        document.getElementById('serverData').classList.add('d-none');
-        document.getElementById('noServers').textContent = '加载服务器列表失败，请刷新页面重试。';
-    }
-}
-
-// 选择服务器
-function selectServer(serverId, serverName) {
-    // 清除之前的更新定时器
-    if (updateInterval) {
-        clearInterval(updateInterval);
-    }
-    
-    // 更新当前选中的服务器
-    currentServerId = serverId;
-    document.getElementById('serverSelector').textContent = serverName;
-    
-    // 显示服务器数据区域
-    document.getElementById('noServers').classList.add('d-none');
-    document.getElementById('serverData').classList.remove('d-none');
-    
-    // 初始化图表
-    initCharts();
-    
-    // 获取服务器数据
-    fetchServerData(serverId);
+    // 加载所有服务器状态
+    loadAllServerStatuses();
     
     // 设置定时更新
-    updateInterval = setInterval(() => {
-        fetchServerData(serverId);
-    }, 5000); // 每5秒更新一次
-}
+    updateInterval = setInterval(loadAllServerStatuses, 5000); // 每5秒更新一次
+});
 
-// 初始化图表
-function initCharts() {
-    // 销毁已存在的图表
-    if (cpuChart) cpuChart.destroy();
-    if (memoryChart) memoryChart.destroy();
-    if (networkChart) networkChart.destroy();
-    
-    // 重置数据数组
-    cpuData = [];
-    memoryData = [];
-    networkData = [];
-    
-    // 图表配置
-    const chartOptions = {
-        responsive: true,
-        maintainAspectRatio: false,
-        animation: {
-            duration: 500
-        },
-        scales: {
-            x: {
-                grid: {
-                    display: false
-                }
-            },
-            y: {
-                beginAtZero: true,
-                grid: {
-                    color: 'rgba(0, 0, 0, 0.05)'
-                }
-            }
-        },
-        plugins: {
-            legend: {
-                position: 'top'
-            }
-        }
-    };
-    
-    // CPU图表
-    const cpuCtx = document.getElementById('cpuChart').getContext('2d');
-    cpuChart = new Chart(cpuCtx, {
-        type: 'line',
-        data: {
-            labels: [],
-            datasets: [{
-                label: 'CPU使用率 (%)',
-                data: [],
-                borderColor: '#0d6efd',
-                backgroundColor: 'rgba(13, 110, 253, 0.1)',
-                borderWidth: 2,
-                fill: true,
-                tension: 0.4
-            }]
-        },
-        options: {
-            ...chartOptions,
-            scales: {
-                ...chartOptions.scales,
-                y: {
-                    ...chartOptions.scales.y,
-                    max: 100
-                }
-            }
-        }
-    });
-    
-    // 内存图表
-    const memoryCtx = document.getElementById('memoryChart').getContext('2d');
-    memoryChart = new Chart(memoryCtx, {
-        type: 'line',
-        data: {
-            labels: [],
-            datasets: [{
-                label: '内存使用率 (%)',
-                data: [],
-                borderColor: '#198754',
-                backgroundColor: 'rgba(25, 135, 84, 0.1)',
-                borderWidth: 2,
-                fill: true,
-                tension: 0.4
-            }]
-        },
-        options: {
-            ...chartOptions,
-            scales: {
-                ...chartOptions.scales,
-                y: {
-                    ...chartOptions.scales.y,
-                    max: 100
-                }
-            }
-        }
-    });
-    
-    // 网络图表
-    const networkCtx = document.getElementById('networkChart').getContext('2d');
-    networkChart = new Chart(networkCtx, {
-        type: 'line',
-        data: {
-            labels: [],
-            datasets: [
-                {
-                    label: '下载速度 (KB/s)',
-                    data: [],
-                    borderColor: '#0dcaf0',
-                    backgroundColor: 'rgba(13, 202, 240, 0.1)',
-                    borderWidth: 2,
-                    fill: false,
-                    tension: 0.4
-                },
-                {
-                    label: '上传速度 (KB/s)',
-                    data: [],
-                    borderColor: '#ffc107',
-                    backgroundColor: 'rgba(255, 193, 7, 0.1)',
-                    borderWidth: 2,
-                    fill: false,
-                    tension: 0.4
-                }
-            ]
-        },
-        options: chartOptions
-    });
-}
-
-// 获取服务器数据
-async function fetchServerData(serverId) {
+// 加载所有服务器状态
+async function loadAllServerStatuses() {
     try {
-        const response = await fetch(\`/api/status/\${serverId}\`);
-        if (!response.ok) {
-            throw new Error('获取服务器数据失败');
+        // 1. 获取服务器列表
+        const serversResponse = await fetch('/api/servers');
+        if (!serversResponse.ok) {
+            throw new Error('获取服务器列表失败');
+        }
+        const serversData = await serversResponse.json();
+        const servers = serversData.servers || [];
+        
+        const noServersAlert = document.getElementById('noServers');
+        const serverTableBody = document.getElementById('serverTableBody');
+        
+        if (servers.length === 0) {
+            noServersAlert.classList.remove('d-none');
+            serverTableBody.innerHTML = '<tr><td colspan="10" class="text-center">暂无服务器数据</td></tr>';
+            return;
+        } else {
+            noServersAlert.classList.add('d-none');
         }
         
-        const data = await response.json();
-        updateDashboard(data);
+        // 2. 并行获取所有服务器的状态
+        const statusPromises = servers.map(server => 
+            fetch(\`/api/status/\${server.id}\`)
+                .then(res => res.ok ? res.json() : Promise.resolve({ server: server, metrics: null, error: true }))
+                .catch(() => Promise.resolve({ server: server, metrics: null, error: true }))
+        );
+        
+        const allStatuses = await Promise.all(statusPromises);
+        
+        // 3. 渲染表格
+        renderServerTable(allStatuses);
+        
     } catch (error) {
-        console.error('获取服务器数据错误:', error);
-        document.getElementById('serverStatus').textContent = '离线';
-        document.getElementById('serverStatus').className = 'badge bg-danger';
+        console.error('加载服务器状态错误:', error);
+        const serverTableBody = document.getElementById('serverTableBody');
+        serverTableBody.innerHTML = '<tr><td colspan="10" class="text-center text-danger">加载服务器数据失败，请刷新页面重试。</td></tr>';
     }
 }
 
-// 更新仪表盘数据
-function updateDashboard(data) {
-    if (!data || !data.metrics) {
-        console.error('无效的服务器数据');
-        return;
+// 生成进度条HTML
+function getProgressBarHtml(percentage) {
+    if (typeof percentage !== 'number' || isNaN(percentage)) return '-';
+    const percent = Math.max(0, Math.min(100, percentage)); // 确保百分比在0到100之间
+    let bgColorClass = 'bg-light-green'; // Use custom light green for < 50%
+
+    if (percent >= 80) {
+        bgColorClass = 'bg-danger'; // Red for >= 80%
+    } else if (percent >= 50) {
+        bgColorClass = 'bg-warning'; // Yellow for 50% - 79%
     }
-    
-    const metrics = data.metrics;
-    const serverInfo = data.server;
-    
-    // 更新服务器信息
-    document.getElementById('serverName').textContent = serverInfo.name;
-    document.getElementById('serverDescription').textContent = serverInfo.description || '无描述';
-    document.getElementById('lastUpdate').textContent = new Date(metrics.timestamp * 1000).toLocaleString();
-    document.getElementById('serverStatus').textContent = '在线';
-    document.getElementById('serverStatus').className = 'badge bg-success';
-    
-    // 更新CPU数据
-    const cpuUsage = metrics.cpu.usage_percent.toFixed(1);
-    document.getElementById('cpuUsage').textContent = \`\${cpuUsage}%\`;
-    document.getElementById('cpuProgressBar').style.width = \`\${cpuUsage}%\`;
-    
-    // 更新内存数据
-    const memoryUsage = metrics.memory.usage_percent.toFixed(1);
-    const memoryTotal = (metrics.memory.total / 1024).toFixed(0); // 转换为MB
-    const memoryUsed = (metrics.memory.used / 1024).toFixed(0); // 转换为MB
-    document.getElementById('memoryUsage').textContent = \`\${memoryUsage}%\`;
-    document.getElementById('memoryProgressBar').style.width = \`\${memoryUsage}%\`;
-    document.getElementById('memoryTotalValue').textContent = memoryTotal;
-    document.getElementById('memoryUsedValue').textContent = memoryUsed;
-    
-    // 更新硬盘数据
-    const diskUsage = metrics.disk.usage_percent.toFixed(1);
-    document.getElementById('diskUsage').textContent = \`\${diskUsage}%\`;
-    document.getElementById('diskProgressBar').style.width = \`\${diskUsage}%\`;
-    document.getElementById('diskTotalValue').textContent = metrics.disk.total.toFixed(0);
-    document.getElementById('diskUsedValue').textContent = metrics.disk.used.toFixed(0);
-    
-    // 更新网络速度
-    const uploadSpeed = formatNetworkSpeed(metrics.network.upload_speed);
-    const downloadSpeed = formatNetworkSpeed(metrics.network.download_speed);
-    document.getElementById('uploadSpeed').textContent = uploadSpeed;
-    document.getElementById('downloadSpeed').textContent = downloadSpeed;
-    
-    // 更新总流量
-    const totalUpload = formatDataSize(metrics.network.total_upload);
-    const totalDownload = formatDataSize(metrics.network.total_download);
-    document.getElementById('totalUpload').textContent = totalUpload;
-    document.getElementById('totalDownload').textContent = totalDownload;
-    
-    // 更新图表数据
-    updateCharts(metrics);
+
+    // Use relative positioning on the container and absolute for the text, centered over the whole bar
+    return \`
+        <div class="progress" style="height: 25px; font-size: 0.8em; position: relative; background-color: #e9ecef;">
+            <div class="progress-bar \${bgColorClass}" role="progressbar" style="width: \${percent}%;" aria-valuenow="\${percent}" aria-valuemin="0" aria-valuemax="100"></div>
+            <span style="position: absolute; width: 100%; text-align: center; line-height: 25px; color: #000; font-weight: bold;">
+                \${percent.toFixed(1)}%
+            </span>
+        </div>
+    \`;
 }
 
-// 更新图表数据
-function updateCharts(metrics) {
-    const time = new Date(metrics.timestamp * 1000).toLocaleTimeString();
+
+// 渲染服务器表格
+function renderServerTable(allStatuses) {
+    const tableBody = document.getElementById('serverTableBody');
+    let tableHtml = '';
     
-    // 限制数据点数量
-    const maxDataPoints = 10;
-    
-    // 更新CPU图表
-    cpuData.push({
-        x: time,
-        y: metrics.cpu.usage_percent
+    allStatuses.forEach(data => {
+        const serverId = data.server.id;
+        const serverName = data.server.name;
+        const metrics = data.metrics;
+        const hasError = data.error;
+        
+        let statusBadge = '<span class="badge bg-secondary">未知</span>';
+        let cpuHtml = '-';
+        let memoryHtml = '-';
+        let diskHtml = '-';
+        let uploadSpeed = '-';
+        let downloadSpeed = '-';
+        let totalUpload = '-';
+        let totalDownload = '-';
+        let lastUpdate = '-';
+        
+        if (hasError) {
+            statusBadge = '<span class="badge bg-warning text-dark">错误</span>';
+        } else if (metrics) {
+            const now = new Date();
+            const lastReportTime = new Date(metrics.timestamp * 1000);
+            const diffMinutes = (now - lastReportTime) / (1000 * 60);
+            
+            if (diffMinutes <= 10) { // 10分钟内算在线
+                statusBadge = '<span class="badge bg-success">在线</span>';
+            } else {
+                statusBadge = '<span class="badge bg-danger">离线</span>';
+            }
+            
+            cpuHtml = getProgressBarHtml(metrics.cpu.usage_percent);
+            memoryHtml = getProgressBarHtml(metrics.memory.usage_percent);
+            diskHtml = getProgressBarHtml(metrics.disk.usage_percent);
+            uploadSpeed = formatNetworkSpeed(metrics.network.upload_speed);
+            downloadSpeed = formatNetworkSpeed(metrics.network.download_speed);
+            totalUpload = formatDataSize(metrics.network.total_upload);
+            totalDownload = formatDataSize(metrics.network.total_download);
+            lastUpdate = lastReportTime.toLocaleString();
+        }
+        
+        // 构建行HTML
+        const rowHtml = \`
+            <tr data-server-id="\${serverId}">
+                <td>\${serverName}</td>
+                <td>\${statusBadge}</td>
+                <td>\${cpuHtml}</td>
+                <td>\${memoryHtml}</td>
+                <td>\${diskHtml}</td>
+                <td><span style="color: #000;">\${uploadSpeed}</span></td>
+                <td><span style="color: #000;">\${downloadSpeed}</span></td>
+                <td><span style="color: #000;">\${totalUpload}</span></td>
+                <td><span style="color: #000;">\${totalDownload}</span></td>
+                <td><span style="color: #000;">\${lastUpdate}</span></td>
+            </tr>
+        \`;
+        
+        // 检查缓存，仅在数据变化时更新DOM
+        const cachedRow = serverDataCache[serverId];
+        if (!cachedRow || cachedRow !== rowHtml) {
+            serverDataCache[serverId] = rowHtml;
+            tableHtml += rowHtml;
+        } else {
+            // 如果没有变化，使用缓存的HTML
+            tableHtml += cachedRow;
+        }
     });
     
-    if (cpuData.length > maxDataPoints) {
-        cpuData.shift();
+    // 批量更新表格内容
+    if (tableBody.innerHTML !== tableHtml) {
+        tableBody.innerHTML = tableHtml;
     }
-    
-    cpuChart.data.labels = cpuData.map(point => point.x);
-    cpuChart.data.datasets[0].data = cpuData.map(point => point.y);
-    cpuChart.update();
-    
-    // 更新内存图表
-    memoryData.push({
-        x: time,
-        y: metrics.memory.usage_percent
-    });
-    
-    if (memoryData.length > maxDataPoints) {
-        memoryData.shift();
-    }
-    
-    memoryChart.data.labels = memoryData.map(point => point.x);
-    memoryChart.data.datasets[0].data = memoryData.map(point => point.y);
-    memoryChart.update();
-    
-    // 更新网络图表
-    networkData.push({
-        x: time,
-        download: metrics.network.download_speed / 1024, // 转换为KB/s
-        upload: metrics.network.upload_speed / 1024 // 转换为KB/s
-    });
-    
-    if (networkData.length > maxDataPoints) {
-        networkData.shift();
-    }
-    
-    networkChart.data.labels = networkData.map(point => point.x);
-    networkChart.data.datasets[0].data = networkData.map(point => point.download);
-    networkChart.data.datasets[1].data = networkData.map(point => point.upload);
-    networkChart.update();
 }
+
 
 // 格式化网络速度
 function formatNetworkSpeed(bytesPerSecond) {
+    if (typeof bytesPerSecond !== 'number' || isNaN(bytesPerSecond)) return '-';
     if (bytesPerSecond < 1024) {
         return \`\${bytesPerSecond.toFixed(1)} B/s\`;
     } else if (bytesPerSecond < 1024 * 1024) {
@@ -1613,6 +1475,7 @@ function formatNetworkSpeed(bytesPerSecond) {
 
 // 格式化数据大小
 function formatDataSize(bytes) {
+    if (typeof bytes !== 'number' || isNaN(bytes)) return '-';
     if (bytes < 1024) {
         return \`\${bytes.toFixed(1)} B\`;
     } else if (bytes < 1024 * 1024) {
@@ -2041,7 +1904,7 @@ async function saveServer() {
         
         // 如果是新添加的服务器，显示API密钥
         if (!serverId && data.server && data.server.api_key) {
-            showApiKey(data.server.id, data.server.api_key);
+            showApiKey(data.server);
         } else {
             // 重新加载服务器列表
             loadServerList();
@@ -2077,14 +1940,12 @@ async function viewApiKey(serverId) {
 }
 
 // 显示API密钥
-function showApiKey(serverId, apiKey) {
-    const server = serverList.find(s => s.id === serverId) || { name: '新服务器' };
-    
+function showApiKey(server) {
     // 填充表单
-    document.getElementById('serverId').value = serverId;
+    document.getElementById('serverId').value = server.id;
     document.getElementById('serverName').value = server.name;
     document.getElementById('serverDescription').value = server.description || '';
-    document.getElementById('apiKey').value = apiKey;
+    document.getElementById('apiKey').value = server.api_key;
     document.getElementById('apiKeyGroup').classList.remove('d-none');
     
     // 设置模态框标题
