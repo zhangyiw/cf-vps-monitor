@@ -9,26 +9,139 @@
 VPS端：![image](https://github.com/user-attachments/assets/c0d92ab4-7e9f-4f57-b255-740b6c281926)
 
 
-# 使用方法：
-1. 把worker.js 里的代码复制到cf worker 里部署。
-2. 创建3个kv命名空间并绑定到worker。分别是：
+# VPS 监控面板 (Cloudflare Worker + D1 版) - 部署指南
 
-    AUTH_STORE
+这是一个部署在 Cloudflare Workers 上的简单 VPS 监控面板，使用 Cloudflare D1 数据库存储数据。本指南将引导你通过 Cloudflare **网页控制面板** 完成部署，无需使用命令行工具。
 
-    SERVERS_STORE
+## 先决条件
 
-    METRICS_STORE
-   
-   到KV存储和数据库创建3个命名空间
-   ![image](https://github.com/user-attachments/assets/3ddb0ea4-9971-436e-98bf-ca5342ff0c3c)
-   
-   都绑定到worker
-   ![image](https://github.com/user-attachments/assets/006f3ae8-ef86-4b3c-9107-c0275be3e9af)
+*   一个 Cloudflare 账户。
 
+## 部署步骤
 
-   
-5. 部署完毕就可以打开worker链接登录账号，默认账号密码：admin admin, 添加vps，获得vps ID和密钥。
-6. 把 enhanced-install.sh 脚本上传到被控vps，并给脚本权限，按照提示安装即可。
-7. 注意worker每日10万次额度
-## 本人不懂代码，只是爱好折腾，所有代码都是AI写的，有问题也别问我，去问AI还更快。
-## 我只提供一下思路，如果又更好的方案请务必@一下我，我去给你star！
+### 1. 创建 D1 数据库
+
+你需要一个 D1 数据库来存储面板数据（服务器列表、API 密钥、监控数据等）。
+
+1.  登录 Cloudflare 控制面板。
+2.  在左侧菜单中，找到并点击 `存储和数据库`。
+3.  在下拉菜单中，选择 `D1 SQL 数据库`。
+4.  点击 `创建数据库`。
+5.  为数据库命名（例如 `vps-monitor-db`），然后点击 `创建`。
+6.  **重要：初始化数据库表**
+    *   数据库创建后，你会看到数据库的概览页面。点击 `控制台` 标签页。
+    *   复制下面的第一段 SQL 命令，粘贴到控制台的输入框中，然后点击 `执行`：
+      ```sql
+      CREATE TABLE IF NOT EXISTS admin_credentials (
+        username TEXT PRIMARY KEY,
+        password TEXT NOT NULL
+      );
+      ```
+    *   复制下面的第二段 SQL 命令，粘贴并点击 `执行`：
+      ```sql
+      CREATE TABLE IF NOT EXISTS servers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        api_key TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL,
+        sort_order INTEGER
+      );
+      ```
+    *   复制下面的第三段 SQL 命令，粘贴并点击 `执行`：
+      ```sql
+      CREATE TABLE IF NOT EXISTS metrics (
+        server_id TEXT PRIMARY KEY,
+        timestamp INTEGER,
+        cpu TEXT,
+        memory TEXT,
+        disk TEXT,
+        network TEXT,
+        FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+      );
+      ```
+    *   现在你的数据库表结构已经准备好了。
+
+### 2. 创建并配置 Worker
+
+接下来，创建 Worker 并将代码部署上去。
+
+1.  在左侧菜单中，点击 `Workers & Pages`。
+2.  在概览页面，点击 `创建`。
+3.  选择 `Start with Hello World!`点击`开始使用`。
+4.  为你的 Worker 命名（例如 `vps-monitor-worker`），确保名称可用。
+5.  点击 `部署`。
+6.  部署完成后，点击 `编辑代码` 进入 Worker 编辑器。
+7.  **删除编辑器中现有的所有代码**。
+8.  打开你本地的 `worker.js` 文件，复制其**全部**内容。
+9.  将复制的代码粘贴到 Cloudflare Worker 编辑器中。
+10. 点击编辑器右上角的 `部署` 按钮。
+
+### 3. 绑定 D1 数据库到 Worker
+
+Worker 需要访问你之前创建的 D1 数据库。
+
+1.  在 Worker 的管理页面（编辑代码页面上方有 Worker 名称，点击它可以返回管理页面），选择 `设置` 标签页。
+2.  在设置页面中，选择 `绑定` 子菜单。
+3.  选择`D1数据库`。
+4.  在 `变量名称` 处输入 `DB` (必须大写)。
+6.  在 `D1 数据库` 下拉菜单中，选择你之前创建的数据库 (例如 `vps-monitor-db`)。
+7.  点击 `部署`。
+
+### 4. 访问面板
+
+部署和绑定完成后，你的监控面板应该可以通过 Worker 的 URL 访问了。
+
+*   返回 Worker 的概览页面（点击 Worker 名称）。
+*   你会看到一个 `.workers.dev` 的 URL，例如 `https://vps-monitor-worker.your-subdomain.workers.dev`。
+*   在浏览器中打开这个 URL，你应该能看到监控面板的前端界面。
+
+## 使用面板
+
+### 1. 初始登录
+
+1.  访问你的 Worker URL。
+2.  点击页面右上角的 `登录` 或直接访问 `/login` 路径 (例如 `https://<你的Worker地址>/login`)。
+3.  使用默认凭据登录：
+    *   用户名: `admin`
+    *   密码: `admin`
+4.  登录后，建议立即修改密码（如果前端支持此功能，或通过直接操作 D1 数据库）。
+
+### 2. 添加服务器
+
+1.  登录后，你应该会看到管理界面。
+2.  找到添加服务器的选项（通常是一个表单）。
+3.  输入服务器的名称和可选的描述。
+4.  点击 `添加` 或 `保存`。
+5.  面板会自动生成一个唯一的 `服务器 ID` 和 `API 密钥`。**请记下这个 服务器ID 和 API 密钥**，部署 Agent 时需要用到。
+
+### 3. 部署 Agent (探针)
+
+Agent 是一个需要在你的 VPS 上运行的脚本，用于收集状态信息并发送回面板。
+下载脚本并运行：
+```
+wget https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/enhanced-install.sh -O enhanced-install.sh && chmod +x enhanced-install.sh && ./enhanced-install.sh
+```
+或者：
+```
+curl -O https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/enhanced-install.sh && chmod +x enhanced-install.sh && ./enhanced-install.sh
+```
+安装需要 `API密钥` `服务器ID` 和 你的`worker网址`
+按照提示输入安装完成后，Agent 会开始定期向你的面板发送数据。你应该能在面板上看到对应服务器的状态更新。
+
+### 4. Agent 管理
+
+安装脚本本身也提供了管理功能：
+
+*   **启动服务:** `sudo ./probe-agent-install.sh start`
+*   **停止服务:** `sudo ./probe-agent-install.sh stop`
+*   **重启服务:** `sudo ./probe-agent-install.sh restart`
+*   **查看状态:** `sudo ./probe-agent-install.sh status`
+*   **查看日志:** `sudo ./probe-agent-install.sh log`
+*   **卸载服务:** `sudo ./probe-agent-install.sh uninstall`
+
+## 注意事项
+
+*   **Worker 和 D1 每日配额:** Cloudflare Worker 和 D1 免费额度有限。详情请查阅 Cloudflare 文档。
+*   **安全性:** 默认密码 `admin` 非常不安全，请务必在首次登录后设法修改。Agent 使用的 API 密钥也应妥善保管。
+*   **错误处理:** 如果面板或 Agent 遇到问题，可以检查 Worker 的日志（在 Cloudflare 控制面板 Worker 页面）和 Agent 的日志（使用 `sudo ./enhanced-install.sh log`）。
