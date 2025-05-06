@@ -1,25 +1,64 @@
 // 合并前后端的单一Worker解决方案
 
-// 处理请求的主函数
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const path = url.pathname;
-    
-    // 处理API请求
-    if (path.startsWith('/api/')) {
-      return handleApiRequest(request, env);
-    }
-    
-    // 处理安装脚本
-    if (path === '/install.sh') {
-      return handleInstallScript(request, url);
-    }
-    
-    // 处理前端静态文件
-    return handleFrontendRequest(request, path);
-  }
+// D1 Table Schemas (for reference and creation)
+const D1_SCHEMAS = {
+  admin_credentials: `
+    CREATE TABLE IF NOT EXISTS admin_credentials (
+      username TEXT PRIMARY KEY,
+      password TEXT NOT NULL
+    );
+    INSERT OR IGNORE INTO admin_credentials (username, password) VALUES ('admin', 'admin');
+  `,
+  servers: `
+    CREATE TABLE IF NOT EXISTS servers (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      api_key TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL,
+      sort_order INTEGER
+    );
+  `,
+  metrics: `
+    CREATE TABLE IF NOT EXISTS metrics (
+      server_id TEXT PRIMARY KEY,
+      timestamp INTEGER,
+      cpu TEXT,
+      memory TEXT,
+      disk TEXT,
+      network TEXT,
+      FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+    );
+  `,
+  monitored_sites: `
+    CREATE TABLE IF NOT EXISTS monitored_sites (
+      id TEXT PRIMARY KEY,
+      url TEXT NOT NULL UNIQUE,
+      name TEXT,
+      added_at INTEGER NOT NULL,
+      last_checked INTEGER,
+      last_status TEXT DEFAULT 'PENDING',
+      last_status_code INTEGER,
+      last_response_time_ms INTEGER,
+      sort_order INTEGER
+    );
+  `
 };
+
+// Helper to ensure all tables exist
+async function ensureTablesExist(db) {
+  console.log("Ensuring all database tables exist...");
+  const statements = Object.values(D1_SCHEMAS).map(sql => db.prepare(sql));
+  try {
+    await db.batch(statements);
+    console.log("Database tables verified/created successfully.");
+  } catch (error) {
+    console.error("Error ensuring database tables exist:", error);
+    // In a real scenario, you might want to handle this more gracefully
+    // For now, we log the error and potentially let subsequent operations fail
+  }
+}
+
 
 // 处理API请求
 async function handleApiRequest(request, env) {
@@ -728,13 +767,371 @@ async function handleApiRequest(request, env) {
       });
     }
   }
-  
-  // 未找到匹配的路由
-  return new Response(JSON.stringify({ error: 'Not found' }), {
+
+  // --- Website Monitoring API ---
+
+  // 处理管理API - 获取监控站点列表
+  if (path === '/api/admin/sites' && method === 'GET') {
+    try {
+      // Order by sort_order, then name/url
+      const stmt = env.DB.prepare('SELECT id, name, url, added_at, last_checked, last_status, last_status_code, last_response_time_ms, sort_order FROM monitored_sites ORDER BY sort_order ASC NULLS LAST, name ASC, url ASC');
+      const { results } = await stmt.all();
+      return new Response(JSON.stringify({ sites: results || [] }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    } catch (error) {
+      console.error("Admin get sites error:", error);
+      // Basic table check/creation attempt
+      if (error.message.includes('no such table')) {
+         console.warn("Monitored sites table not found. Returning empty list and attempting to create...");
+         try {
+           await env.DB.exec(D1_SCHEMAS.monitored_sites);
+           return new Response(JSON.stringify({ sites: [] }), { // Return empty list
+             headers: { 'Content-Type': 'application/json', ...corsHeaders }
+           });
+         } catch (createError) {
+            console.error("Failed to create monitored_sites table:", createError);
+         }
+       }
+      return new Response(JSON.stringify({ error: 'Internal server error', message: error.message }), {
+        status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+  }
+
+  // 处理管理API - 添加监控站点
+  if (path === '/api/admin/sites' && method === 'POST') {
+    try {
+      const { url, name } = await request.json();
+
+      if (!url || !isValidHttpUrl(url)) {
+        return new Response(JSON.stringify({ error: 'Valid URL is required' }), {
+          status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        });
+      }
+
+      const siteId = Math.random().toString(36).substring(2, 12); // Longer ID
+      const addedAt = Math.floor(Date.now() / 1000);
+
+      // Get current max sort_order for sites
+      const maxOrderStmt = env.DB.prepare('SELECT MAX(sort_order) as max_order FROM monitored_sites');
+      const maxOrderResult = await maxOrderStmt.first();
+      const nextSortOrder = (maxOrderResult && typeof maxOrderResult.max_order === 'number') ? maxOrderResult.max_order + 1 : 0;
+
+
+      const stmt = env.DB.prepare(
+        'INSERT INTO monitored_sites (id, url, name, added_at, last_status, sort_order) VALUES (?, ?, ?, ?, ?, ?)'
+      );
+      await stmt.bind(siteId, url, name || '', addedAt, 'PENDING', nextSortOrder).run();
+
+      const siteData = { id: siteId, url, name: name || '', added_at: addedAt, last_status: 'PENDING', sort_order: nextSortOrder };
+      return new Response(JSON.stringify({ site: siteData }), {
+        status: 201, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    } catch (error) {
+      console.error("Admin add site error:", error);
+      if (error.message.includes('UNIQUE constraint failed')) {
+         return new Response(JSON.stringify({ error: 'URL already exists or ID conflict', message: '该URL已被监控或ID冲突' }), {
+           status: 409, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+         });
+      }
+      // Basic table check/creation attempt
+      if (error.message.includes('no such table')) {
+         console.warn("Monitored sites table not found. Attempting to create...");
+         try {
+           await env.DB.exec(D1_SCHEMAS.monitored_sites);
+           return new Response(JSON.stringify({ error: 'Database table created, please retry', message: '数据库表已创建，请重试添加操作' }), {
+              status: 503, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+            });
+         } catch (createError) {
+            console.error("Failed to create monitored_sites table:", createError);
+         }
+       }
+      return new Response(JSON.stringify({ error: 'Internal server error', message: error.message }), {
+        status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+  }
+
+  // 处理管理API - 删除监控站点
+  if (path.match(/\/api\/admin\/sites\/[^\/]+$/) && method === 'DELETE') {
+    try {
+      const siteId = path.split('/').pop();
+      const stmt = env.DB.prepare('DELETE FROM monitored_sites WHERE id = ?');
+      const info = await stmt.bind(siteId).run();
+
+      if (info.changes === 0) {
+        return new Response(JSON.stringify({ error: 'Site not found' }), {
+          status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        });
+      }
+
+      return new Response(JSON.stringify({ success: true }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    } catch (error) {
+      console.error("Admin delete site error:", error);
+      return new Response(JSON.stringify({ error: 'Internal server error', message: error.message }), {
+        status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+  }
+
+  // 处理管理API - 网站排序
+  if (path.match(/\/api\/admin\/sites\/[^\/]+\/reorder$/) && method === 'POST') {
+    try {
+      const siteId = path.split('/')[4]; // Get siteId from path
+      const { direction } = await request.json(); // 'up' or 'down'
+
+      if (!direction || (direction !== 'up' && direction !== 'down')) {
+        return new Response(JSON.stringify({ error: 'Invalid direction' }), {
+          status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        });
+      }
+
+      // Get all sites ordered correctly
+      const results = await env.DB.batch([
+        env.DB.prepare('SELECT id, sort_order FROM monitored_sites ORDER BY sort_order ASC NULLS LAST, name ASC, url ASC')
+      ]);
+      const allSites = results[0].results;
+      const currentIndex = allSites.findIndex(s => s.id === siteId);
+
+      if (currentIndex === -1) {
+        return new Response(JSON.stringify({ error: 'Site not found' }), {
+          status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        });
+      }
+
+      let targetIndex = -1;
+      if (direction === 'up' && currentIndex > 0) {
+        targetIndex = currentIndex - 1;
+      } else if (direction === 'down' && currentIndex < allSites.length - 1) {
+        targetIndex = currentIndex + 1;
+      }
+
+      if (targetIndex !== -1) {
+        const currentSite = allSites[currentIndex];
+        const targetSite = allSites[targetIndex];
+
+        // Handle potential NULL sort_order by re-assigning all if needed
+        if (currentSite.sort_order === null || targetSite.sort_order === null) {
+           console.warn("Reordering sites with NULL sort_order, re-assigning all orders.");
+           const updateStmts = allSites.map((site, index) =>
+             env.DB.prepare('UPDATE monitored_sites SET sort_order = ? WHERE id = ?').bind(index, site.id)
+           );
+           await env.DB.batch(updateStmts);
+           // Re-fetch updated orders to perform the swap correctly
+           const updatedResults = await env.DB.batch([
+              env.DB.prepare('SELECT id, sort_order FROM monitored_sites ORDER BY sort_order ASC')
+           ]);
+           const updatedSites = updatedResults[0].results;
+           const newCurrentIndex = updatedSites.findIndex(s => s.id === siteId);
+           let newTargetIndex = -1;
+           if (direction === 'up' && newCurrentIndex > 0) newTargetIndex = newCurrentIndex - 1;
+           else if (direction === 'down' && newCurrentIndex < updatedSites.length - 1) newTargetIndex = newCurrentIndex + 1;
+
+           if (newTargetIndex !== -1) {
+              const currentOrder = updatedSites[newCurrentIndex].sort_order;
+              const targetOrder = updatedSites[newTargetIndex].sort_order;
+              await env.DB.batch([
+                env.DB.prepare('UPDATE monitored_sites SET sort_order = ? WHERE id = ?').bind(targetOrder, siteId),
+                env.DB.prepare('UPDATE monitored_sites SET sort_order = ? WHERE id = ?').bind(currentOrder, updatedSites[newTargetIndex].id)
+              ]);
+           }
+        } else {
+          // Swap existing sort_order values
+          await env.DB.batch([
+            env.DB.prepare('UPDATE monitored_sites SET sort_order = ? WHERE id = ?').bind(targetSite.sort_order, siteId),
+            env.DB.prepare('UPDATE monitored_sites SET sort_order = ? WHERE id = ?').bind(currentSite.sort_order, targetSite.id)
+          ]);
+        }
+      }
+
+      return new Response(JSON.stringify({ success: true }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+
+    } catch (error) {
+      console.error("Admin reorder site error:", error);
+      return new Response(JSON.stringify({ error: 'Internal server error', message: error.message }), {
+        status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+  }
+
+
+  // 处理公共API - 获取所有监控站点状态 (URL removed)
+  if (path === '/api/sites/status' && method === 'GET') {
+     try {
+      // Select necessary fields for public view (NO URL)
+      // Order by name for public view consistency
+      const stmt = env.DB.prepare('SELECT id, name, last_checked, last_status, last_status_code, last_response_time_ms FROM monitored_sites ORDER BY name ASC, id ASC');
+      const { results } = await stmt.all();
+      return new Response(JSON.stringify({ sites: results || [] }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    } catch (error) {
+      console.error("Get sites status error:", error);
+       // Basic table check/creation attempt
+      if (error.message.includes('no such table')) {
+         console.warn("Monitored sites table not found. Returning empty list and attempting to create...");
+         try {
+           await env.DB.exec(D1_SCHEMAS.monitored_sites);
+           return new Response(JSON.stringify({ sites: [] }), { // Return empty list
+             headers: { 'Content-Type': 'application/json', ...corsHeaders }
+           });
+         } catch (createError) {
+            console.error("Failed to create monitored_sites table:", createError);
+         }
+       }
+      return new Response(JSON.stringify({ error: 'Internal server error', message: error.message }), {
+        status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+  }
+
+  // --- End Website Monitoring API ---
+
+
+  // 未找到匹配的API路由
+  return new Response(JSON.stringify({ error: 'API endpoint not found' }), {
     status: 404,
     headers: { 'Content-Type': 'application/json', ...corsHeaders }
   });
 }
+
+
+// --- Scheduled Task for Website Monitoring ---
+
+async function checkWebsiteStatus(site, db) {
+  const { id, url } = site;
+  const startTime = Date.now();
+  let status = 'PENDING';
+  let statusCode = null;
+  let responseTime = null;
+
+  try {
+    // Use HEAD request for efficiency, fall back to GET if needed or specified
+    const response = await fetch(url, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(15000) }); // 15 second timeout
+    
+    responseTime = Date.now() - startTime;
+    statusCode = response.status;
+
+    // Consider redirects (3xx) and success (2xx) as UP
+    if (response.ok || (response.status >= 300 && response.status < 400)) {
+      status = 'UP';
+    } else {
+      status = 'DOWN'; // Includes 4xx, 5xx errors
+    }
+
+  } catch (error) {
+     responseTime = Date.now() - startTime;
+     if (error.name === 'TimeoutError') {
+        status = 'TIMEOUT';
+     } else {
+        status = 'ERROR'; // Network error, DNS error, etc.
+        console.error(`Error checking site ${id} (${url}):`, error.message);
+     }
+  }
+
+  const checkTime = Math.floor(Date.now() / 1000);
+
+  // Update D1
+  try {
+    const stmt = db.prepare(
+      'UPDATE monitored_sites SET last_checked = ?, last_status = ?, last_status_code = ?, last_response_time_ms = ? WHERE id = ?'
+    );
+    await stmt.bind(checkTime, status, statusCode, responseTime, id).run();
+    console.log(`Checked site ${id} (${url}): ${status} (${statusCode || 'N/A'}), ${responseTime}ms`);
+  } catch (dbError) {
+     console.error(`Failed to update status for site ${id} (${url}) in D1:`, dbError);
+  }
+}
+
+// Combine fetch and scheduled handlers into a single default export
+export default {
+  async fetch(request, env, ctx) {
+    // Ensure tables exist on first request (or periodically)
+    // Using ctx.waitUntil to not block the response
+    ctx.waitUntil(ensureTablesExist(env.DB));
+
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // API requests
+    if (path.startsWith('/api/')) {
+      return handleApiRequest(request, env);
+    }
+
+    // Install script
+    if (path === '/install.sh') {
+      return handleInstallScript(request, url);
+    }
+
+    // Frontend static files
+    return handleFrontendRequest(request, path);
+  },
+
+  async scheduled(event, env, ctx) {
+    console.log(`Cron Trigger: ${event.cron} - Running website status checks...`);
+    ctx.waitUntil(
+      (async () => {
+        try {
+          // Ensure table exists before proceeding
+          await ensureTablesExist(env.DB);
+
+          // Get all sites to monitor
+          const stmt = env.DB.prepare('SELECT id, url FROM monitored_sites');
+          const { results: sitesToCheck } = await stmt.all();
+
+          if (!sitesToCheck || sitesToCheck.length === 0) {
+            console.log("No sites configured for monitoring.");
+            return;
+          }
+
+          console.log(`Found ${sitesToCheck.length} sites to check.`);
+
+          // Check sites concurrently (with a limit to avoid overwhelming the worker/D1)
+          const concurrencyLimit = 10; // Adjust as needed
+          const promises = [];
+          for (const site of sitesToCheck) {
+             promises.push(checkWebsiteStatus(site, env.DB));
+             if (promises.length >= concurrencyLimit) {
+                await Promise.all(promises);
+                promises.length = 0; // Clear the array for the next batch
+             }
+          }
+          // Wait for any remaining promises
+          if (promises.length > 0) {
+             await Promise.all(promises);
+          }
+
+          console.log("Website status checks completed.");
+
+        } catch (error) {
+          console.error("Error during scheduled website checks:", error);
+        }
+      })()
+    );
+  }
+};
+
+
+// --- Utility Functions ---
+
+// Basic HTTP/HTTPS URL validation
+function isValidHttpUrl(string) {
+  let url;
+  try {
+    url = new URL(string);
+  } catch (_) {
+    return false;
+  }
+  return url.protocol === "http:" || url.protocol === "https:";
+}
+
+
+// --- Original Handlers (Install Script, Frontend) ---
 
 // 处理安装脚本
 function handleInstallScript(request, url) {
@@ -1040,6 +1437,32 @@ function getIndexHtml() {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.1/font/bootstrap-icons.css" rel="stylesheet">
     <link href="/css/style.css" rel="stylesheet">
+    <style>
+        .server-row {
+            cursor: pointer; /* Indicate clickable rows */
+        }
+        .server-details-row {
+            /* display: none; /* Initially hidden - controlled by JS */ */
+        }
+        .server-details-row td {
+            padding: 1rem;
+            background-color: #f8f9fa; /* Light background for details */
+        }
+        .server-details-content {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+        }
+        .detail-item {
+            background-color: #e9ecef;
+            padding: 0.75rem;
+            border-radius: 0.25rem;
+        }
+        .detail-item strong {
+            display: block;
+            margin-bottom: 0.25rem;
+        }
+    </style>
 </head>
 <body>
     <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
@@ -1051,7 +1474,7 @@ function getIndexHtml() {
             <div class="collapse navbar-collapse" id="navbarNav">
                 <ul class="navbar-nav ms-auto">
                     <li class="nav-item">
-                        <a class="nav-link" href="/login.html">管理员登录</a>
+                        <a class="nav-link" id="adminAuthLink" href="/login.html">管理员登录</a>
                     </li>
                 </ul>
             </div>
@@ -1087,6 +1510,44 @@ function getIndexHtml() {
             </table>
         </div>
     </div>
+
+    <!-- Website Status Section -->
+    <div class="container mt-5">
+        <h2>网站在线状态</h2>
+        <div id="noSites" class="alert alert-info d-none">
+            暂无监控网站数据。
+        </div>
+        <div class="table-responsive">
+            <table class="table table-striped table-hover align-middle">
+                <thead>
+                    <tr>
+                        <th>名称</th>
+                        <th>状态</th>
+                        <th>状态码</th>
+                        <th>响应时间 (ms)</th>
+                        <th>最后检查</th>
+                    </tr>
+                </thead>
+                <tbody id="siteStatusTableBody">
+                    <tr>
+                        <td colspan="5" class="text-center">加载中...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <!-- End Website Status Section -->
+
+    <!-- Server Detailed row template (hidden by default) -->
+    <template id="serverDetailsTemplate">
+        <tr class="server-details-row d-none">
+            <td colspan="10">
+                <div class="server-details-content">
+                    <!-- Detailed metrics will be populated here by JavaScript -->
+                </div>
+            </td>
+        </tr>
+    </template>
 
     <footer class="footer mt-5 py-3 bg-light">
         <div class="container text-center">
@@ -1244,6 +1705,46 @@ function getAdminHtml() {
         </div>
     </div>
 
+    <!-- Website Monitoring Section -->
+    <div class="container mt-5">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h2>网站监控管理</h2>
+            <button id="addSiteBtn" class="btn btn-success">
+                <i class="bi bi-plus-circle"></i> 添加监控网站
+            </button>
+        </div>
+
+        <div id="siteAlert" class="alert d-none"></div>
+
+        <div class="card">
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover">
+                        <thead>
+                            <tr>
+                                <th>排序</th>
+                                <th>名称</th>
+                                <th>URL</th>
+                                <th>状态</th>
+                                <th>状态码</th>
+                                <th>响应时间 (ms)</th>
+                                <th>最后检查</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="siteTableBody">
+                            <tr>
+                                <td colspan="8" class="text-center">加载中...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- End Website Monitoring Section -->
+
+
     <!-- 服务器模态框 -->
     <div class="modal fade" id="serverModal" tabindex="-1">
         <div class="modal-dialog">
@@ -1283,7 +1784,36 @@ function getAdminHtml() {
         </div>
     </div>
 
-    <!-- 删除确认模态框 -->
+    <!-- 网站监控模态框 -->
+    <div class="modal fade" id="siteModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="siteModalTitle">添加监控网站</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="siteForm">
+                        <input type="hidden" id="siteId">
+                        <div class="mb-3">
+                            <label for="siteName" class="form-label">网站名称（可选）</label>
+                            <input type="text" class="form-control" id="siteName">
+                        </div>
+                        <div class="mb-3">
+                            <label for="siteUrl" class="form-label">网站URL</label>
+                            <input type="url" class="form-control" id="siteUrl" placeholder="https://example.com" required>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-primary" id="saveSiteBtn">保存</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 服务器删除确认模态框 -->
     <div class="modal fade" id="deleteModal" tabindex="-1">
         <div class="modal-dialog">
             <div class="modal-content">
@@ -1298,6 +1828,26 @@ function getAdminHtml() {
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
                     <button type="button" class="btn btn-danger" id="confirmDeleteBtn">删除</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+     <!-- 网站删除确认模态框 -->
+    <div class="modal fade" id="deleteSiteModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">确认删除网站监控</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p>确定要停止监控网站 "<span id="deleteSiteName"></span>" (<span id="deleteSiteUrl"></span>) 吗？</p>
+                    <p class="text-danger">此操作不可逆。</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-danger" id="confirmDeleteSiteBtn">删除</button>
                 </div>
             </div>
         </div>
@@ -1404,64 +1954,217 @@ body {
 function getMainJs() {
   return `// main.js - 首页面的JavaScript逻辑
 
-// 全局变量
+// Global variables
 let updateInterval = null;
-let serverDataCache = {}; // 用于缓存服务器数据，减少重复渲染
+let serverDataCache = {}; // Cache server data to avoid re-fetching for details
 
-// 页面加载完成后执行
+// Execute after the page loads
 document.addEventListener('DOMContentLoaded', function() {
-    // 加载所有服务器状态
+    // Load all server statuses
     loadAllServerStatuses();
-    
-    // 设置定时更新
-    updateInterval = setInterval(loadAllServerStatuses, 5000); // 每5秒更新一次
+    // Load website statuses
+    loadAllSiteStatuses();
+
+    // Set up periodic updates
+    updateInterval = setInterval(() => {
+        loadAllServerStatuses();
+        loadAllSiteStatuses();
+    }, 5000); // Update every 5 seconds
+
+    // Add click event listener to the table body for row expansion
+    document.getElementById('serverTableBody').addEventListener('click', handleRowClick);
+
+    // Check login status and update admin link
+    updateAdminLink();
 });
 
-// 加载所有服务器状态
+// Check login status and update the admin link in the navbar
+async function updateAdminLink() {
+    const adminLink = document.getElementById('adminAuthLink');
+    if (!adminLink) return; // Exit if link not found
+
+    try {
+        const token = localStorage.getItem('auth_token');
+        if (!token) {
+            // Not logged in (no token)
+            adminLink.textContent = '管理员登录';
+            adminLink.href = '/login.html';
+            return;
+        }
+
+        const response = await fetch('/api/auth/status', {
+            headers: {
+                'Authorization': \`Bearer \${token}\`
+            }
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            if (data.authenticated) {
+                // Logged in
+                adminLink.textContent = '管理后台';
+                adminLink.href = '/admin.html';
+            } else {
+                // Invalid token or not authenticated
+                adminLink.textContent = '管理员登录';
+                adminLink.href = '/login.html';
+                localStorage.removeItem('auth_token'); // Clean up invalid token
+            }
+        } else {
+            // API error, assume not logged in
+            adminLink.textContent = '管理员登录';
+            adminLink.href = '/login.html';
+        }
+    } catch (error) {
+        console.error('Error checking auth status for navbar link:', error);
+        // Network error, assume not logged in
+        adminLink.textContent = '管理员登录';
+        adminLink.href = '/login.html';
+    }
+}
+
+
+// Handle click on a server row
+function handleRowClick(event) {
+    const clickedRow = event.target.closest('tr.server-row');
+    if (!clickedRow) return; // Not a server row
+
+    const serverId = clickedRow.getAttribute('data-server-id');
+    const detailsRow = clickedRow.nextElementSibling; // The details row is the next sibling
+
+    if (detailsRow && detailsRow.classList.contains('server-details-row')) {
+        // Toggle visibility
+        detailsRow.classList.toggle('d-none');
+
+        // If showing, populate with detailed data
+        if (!detailsRow.classList.contains('d-none')) {
+            populateDetailsRow(serverId, detailsRow);
+        }
+    }
+}
+
+// Populate the detailed row with data
+function populateDetailsRow(serverId, detailsRow) {
+    const serverData = serverDataCache[serverId];
+    const detailsContentDiv = detailsRow.querySelector('.server-details-content');
+
+    if (!serverData || !serverData.metrics || !detailsContentDiv) {
+        detailsContentDiv.innerHTML = '<p class="text-muted">无详细数据</p>';
+        return;
+    }
+
+    const metrics = serverData.metrics;
+
+    let detailsHtml = '';
+
+    // CPU Details
+    if (metrics.cpu && metrics.cpu.load_avg) {
+        detailsHtml += \`
+            <div class="detail-item">
+                <strong>CPU负载 (1m, 5m, 15m):</strong> \${metrics.cpu.load_avg.join(', ')}
+            </div>
+        \`;
+    }
+
+    // Memory Details
+    if (metrics.memory) {
+        detailsHtml += \`
+            <div class="detail-item">
+                <strong>内存:</strong>
+                总计: \${formatDataSize(metrics.memory.total * 1024)}<br>
+                已用: \${formatDataSize(metrics.memory.used * 1024)}<br>
+                空闲: \${formatDataSize(metrics.memory.free * 1024)}
+            </div>
+        \`;
+    }
+
+    // Disk Details
+    if (metrics.disk) {
+         detailsHtml += \`
+            <div class="detail-item">
+                <strong>硬盘 (/):</strong>
+                总计: \${metrics.disk.total.toFixed(2)} GB<br>
+                已用: \${metrics.disk.used.toFixed(2)} GB<br>
+                空闲: \${metrics.disk.free.toFixed(2)} GB
+            </div>
+        \`;
+    }
+
+    // Network Totals
+    if (metrics.network) {
+        detailsHtml += \`
+            <div class="detail-item">
+                <strong>总流量:</strong>
+                上传: \${formatDataSize(metrics.network.total_upload)}<br>
+                下载: \${formatDataSize(metrics.network.total_download)}
+            </div>
+        \`;
+    }
+
+    detailsContentDiv.innerHTML = detailsHtml || '<p class="text-muted">无详细数据</p>';
+}
+
+
+// Load all server statuses
 async function loadAllServerStatuses() {
     try {
-        // 1. 获取服务器列表
+        // 1. Get server list
         const serversResponse = await fetch('/api/servers');
         if (!serversResponse.ok) {
-            throw new Error('获取服务器列表失败');
+            throw new Error('Failed to get server list');
         }
         const serversData = await serversResponse.json();
         const servers = serversData.servers || [];
-        
+
         const noServersAlert = document.getElementById('noServers');
         const serverTableBody = document.getElementById('serverTableBody');
-        
+
         if (servers.length === 0) {
             noServersAlert.classList.remove('d-none');
-            serverTableBody.innerHTML = '<tr><td colspan="10" class="text-center">暂无服务器数据</td></tr>';
+            serverTableBody.innerHTML = '<tr><td colspan="10" class="text-center">No server data available. Please log in to the admin panel to add servers.</td></tr>';
+            // Remove any existing detail rows if the server list becomes empty
+            removeAllDetailRows();
             return;
         } else {
             noServersAlert.classList.add('d-none');
         }
-        
-        // 2. 并行获取所有服务器的状态
-        const statusPromises = servers.map(server => 
+
+        // 2. Fetch status for all servers in parallel
+        const statusPromises = servers.map(server =>
             fetch(\`/api/status/\${server.id}\`)
                 .then(res => res.ok ? res.json() : Promise.resolve({ server: server, metrics: null, error: true }))
                 .catch(() => Promise.resolve({ server: server, metrics: null, error: true }))
         );
-        
+
         const allStatuses = await Promise.all(statusPromises);
-        
-        // 3. 渲染表格
+
+        // Update the serverDataCache with the latest data
+        allStatuses.forEach(data => {
+             serverDataCache[data.server.id] = data;
+        });
+
+
+        // 3. Render the table using DOM manipulation
         renderServerTable(allStatuses);
-        
+
     } catch (error) {
-        console.error('加载服务器状态错误:', error);
+        console.error('Error loading server statuses:', error);
         const serverTableBody = document.getElementById('serverTableBody');
-        serverTableBody.innerHTML = '<tr><td colspan="10" class="text-center text-danger">加载服务器数据失败，请刷新页面重试。</td></tr>';
+        serverTableBody.innerHTML = '<tr><td colspan="10" class="text-center text-danger">Failed to load server data. Please refresh the page.</td></tr>';
+         removeAllDetailRows();
     }
 }
 
-// 生成进度条HTML
+// Remove all existing server detail rows
+function removeAllDetailRows() {
+    document.querySelectorAll('.server-details-row').forEach(row => row.remove());
+}
+
+
+// Generate progress bar HTML
 function getProgressBarHtml(percentage) {
     if (typeof percentage !== 'number' || isNaN(percentage)) return '-';
-    const percent = Math.max(0, Math.min(100, percentage)); // 确保百分比在0到100之间
+    const percent = Math.max(0, Math.min(100, percentage)); // Ensure percentage is between 0 and 100
     let bgColorClass = 'bg-light-green'; // Use custom light green for < 50%
 
     if (percent >= 80) {
@@ -1482,17 +2185,18 @@ function getProgressBarHtml(percentage) {
 }
 
 
-// 渲染服务器表格
+// Render the server table using DOM manipulation
 function renderServerTable(allStatuses) {
     const tableBody = document.getElementById('serverTableBody');
-    let tableHtml = '';
-    
+    tableBody.innerHTML = ''; // Clear existing rows
+    const detailsTemplate = document.getElementById('serverDetailsTemplate');
+
     allStatuses.forEach(data => {
         const serverId = data.server.id;
         const serverName = data.server.name;
         const metrics = data.metrics;
         const hasError = data.error;
-        
+
         let statusBadge = '<span class="badge bg-secondary">未知</span>';
         let cpuHtml = '-';
         let memoryHtml = '-';
@@ -1502,20 +2206,20 @@ function renderServerTable(allStatuses) {
         let totalUpload = '-';
         let totalDownload = '-';
         let lastUpdate = '-';
-        
+
         if (hasError) {
             statusBadge = '<span class="badge bg-warning text-dark">错误</span>';
         } else if (metrics) {
             const now = new Date();
             const lastReportTime = new Date(metrics.timestamp * 1000);
             const diffMinutes = (now - lastReportTime) / (1000 * 60);
-            
-            if (diffMinutes <= 10) { // 10分钟内算在线
+
+            if (diffMinutes <= 10) { // Considered online within 10 minutes
                 statusBadge = '<span class="badge bg-success">在线</span>';
             } else {
                 statusBadge = '<span class="badge bg-danger">离线</span>';
             }
-            
+
             cpuHtml = getProgressBarHtml(metrics.cpu.usage_percent);
             memoryHtml = getProgressBarHtml(metrics.memory.usage_percent);
             diskHtml = getProgressBarHtml(metrics.disk.usage_percent);
@@ -1525,42 +2229,37 @@ function renderServerTable(allStatuses) {
             totalDownload = formatDataSize(metrics.network.total_download);
             lastUpdate = lastReportTime.toLocaleString();
         }
-        
-        // 构建行HTML
-        const rowHtml = \`
-            <tr data-server-id="\${serverId}">
-                <td>\${serverName}</td>
-                <td>\${statusBadge}</td>
-                <td>\${cpuHtml}</td>
-                <td>\${memoryHtml}</td>
-                <td>\${diskHtml}</td>
-                <td><span style="color: #000;">\${uploadSpeed}</span></td>
-                <td><span style="color: #000;">\${downloadSpeed}</span></td>
-                <td><span style="color: #000;">\${totalUpload}</span></td>
-                <td><span style="color: #000;">\${totalDownload}</span></td>
-                <td><span style="color: #000;">\${lastUpdate}</span></td>
-            </tr>
+
+        // Create the main row
+        const mainRow = document.createElement('tr');
+        mainRow.classList.add('server-row');
+        mainRow.setAttribute('data-server-id', serverId);
+        mainRow.innerHTML = \`
+            <td>\${serverName}</td>
+            <td>\${statusBadge}</td>
+            <td>\${cpuHtml}</td>
+            <td>\${memoryHtml}</td>
+            <td>\${diskHtml}</td>
+            <td><span style="color: #000;">\${uploadSpeed}</span></td>
+            <td><span style="color: #000;">\${downloadSpeed}</span></td>
+            <td><span style="color: #000;">\${totalUpload}</span></td>
+            <td><span style="color: #000;">\${totalDownload}</span></td>
+            <td><span style="color: #000;">\${lastUpdate}</span></td>
         \`;
-        
-        // 检查缓存，仅在数据变化时更新DOM
-        const cachedRow = serverDataCache[serverId];
-        if (!cachedRow || cachedRow !== rowHtml) {
-            serverDataCache[serverId] = rowHtml;
-            tableHtml += rowHtml;
-        } else {
-            // 如果没有变化，使用缓存的HTML
-            tableHtml += cachedRow;
-        }
+
+        // Clone the details row template
+        const detailsRow = detailsTemplate.content.cloneNode(true).querySelector('tr');
+        detailsRow.setAttribute('data-server-id', \`\${serverId}-details\`);
+
+
+        // Append both rows to the table body
+        tableBody.appendChild(mainRow);
+        tableBody.appendChild(detailsRow);
     });
-    
-    // 批量更新表格内容
-    if (tableBody.innerHTML !== tableHtml) {
-        tableBody.innerHTML = tableHtml;
-    }
 }
 
 
-// 格式化网络速度
+// Format network speed
 function formatNetworkSpeed(bytesPerSecond) {
     if (typeof bytesPerSecond !== 'number' || isNaN(bytesPerSecond)) return '-';
     if (bytesPerSecond < 1024) {
@@ -1574,7 +2273,7 @@ function formatNetworkSpeed(bytesPerSecond) {
     }
 }
 
-// 格式化数据大小
+// Format data size
 function formatDataSize(bytes) {
     if (typeof bytes !== 'number' || isNaN(bytes)) return '-';
     if (bytes < 1024) {
@@ -1588,7 +2287,75 @@ function formatDataSize(bytes) {
     } else {
         return \`\${(bytes / (1024 * 1024 * 1024 * 1024)).toFixed(1)} TB\`;
     }
-}`;
+}
+
+
+// --- Website Status Functions ---
+
+// Load all website statuses
+async function loadAllSiteStatuses() {
+    try {
+        const response = await fetch('/api/sites/status');
+        if (!response.ok) {
+            throw new Error('Failed to get website status list');
+        }
+        const data = await response.json();
+        const sites = data.sites || [];
+
+        const noSitesAlert = document.getElementById('noSites');
+        const siteStatusTableBody = document.getElementById('siteStatusTableBody');
+
+        if (sites.length === 0) {
+            noSitesAlert.classList.remove('d-none');
+            siteStatusTableBody.innerHTML = '<tr><td colspan="5" class="text-center">No websites are being monitored.</td></tr>'; // Colspan updated
+            return;
+        } else {
+            noSitesAlert.classList.add('d-none');
+        }
+
+        renderSiteStatusTable(sites);
+
+    } catch (error) {
+        console.error('Error loading website statuses:', error);
+        const siteStatusTableBody = document.getElementById('siteStatusTableBody');
+        siteStatusTableBody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">Failed to load website status data. Please refresh the page.</td></tr>'; // Colspan updated
+    }
+}
+
+// Render the website status table
+function renderSiteStatusTable(sites) {
+    const tableBody = document.getElementById('siteStatusTableBody');
+    tableBody.innerHTML = ''; // Clear existing rows
+
+    sites.forEach(site => {
+        const row = document.createElement('tr');
+        const statusInfo = getSiteStatusBadge(site.last_status); // Reuse badge function from admin.js logic
+        const lastCheckTime = site.last_checked ? new Date(site.last_checked * 1000).toLocaleString() : '从未';
+        const responseTime = site.last_response_time_ms !== null ? \`\${site.last_response_time_ms} ms\` : '-';
+
+        row.innerHTML = \`
+            <td>\${site.name || '-'}</td>
+            <td><span class="badge \${statusInfo.class}">\${statusInfo.text}</span></td>
+            <td>\${site.last_status_code || '-'}</td>
+            <td>\${responseTime}</td>
+            <td>\${lastCheckTime}</td>
+        \`;
+        tableBody.appendChild(row);
+    });
+}
+
+// Get website status badge class and text (copied from admin.js for reuse)
+function getSiteStatusBadge(status) {
+    switch (status) {
+        case 'UP': return { class: 'bg-success', text: '正常' };
+        case 'DOWN': return { class: 'bg-danger', text: '故障' };
+        case 'TIMEOUT': return { class: 'bg-warning text-dark', text: '超时' };
+        case 'ERROR': return { class: 'bg-danger', text: '错误' };
+        case 'PENDING': return { class: 'bg-secondary', text: '待检测' };
+        default: return { class: 'bg-secondary', text: '未知' };
+    }
+}
+`;
 }
 
 function getLoginJs() {
@@ -1706,7 +2473,9 @@ function getAdminJs() {
 
 // 全局变量
 let currentServerId = null;
+let currentSiteId = null; // For site deletion
 let serverList = [];
+let siteList = []; // For monitored sites
 
 // 页面加载完成后执行
 document.addEventListener('DOMContentLoaded', function() {
@@ -1718,6 +2487,8 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // 加载服务器列表
     loadServerList();
+    // 加载监控网站列表
+    loadSiteList();
 });
 
 // 检查登录状态
@@ -1806,6 +2577,21 @@ function initEventListeners() {
     document.getElementById('logoutBtn').addEventListener('click', function() {
         logout();
     });
+
+    // --- Site Monitoring Event Listeners ---
+    document.getElementById('addSiteBtn').addEventListener('click', function() {
+        showSiteModal();
+    });
+
+    document.getElementById('saveSiteBtn').addEventListener('click', function() {
+        saveSite();
+    });
+
+     document.getElementById('confirmDeleteSiteBtn').addEventListener('click', function() {
+        if (currentSiteId) {
+            deleteSite(currentSiteId);
+        }
+    });
 }
 
 // 获取认证头
@@ -1835,6 +2621,30 @@ async function loadServerList() {
     } catch (error) {
         console.error('加载服务器列表错误:', error);
         showAlert('danger', '加载服务器列表失败，请刷新页面重试。');
+    }
+}
+
+
+// --- Server Management Functions ---
+
+// 加载服务器列表
+async function loadServerList() {
+    try {
+        const response = await fetch('/api/admin/servers', {
+            headers: getAuthHeaders()
+        });
+
+        if (!response.ok) {
+            throw new Error('获取服务器列表失败');
+        }
+
+        const data = await response.json();
+        serverList = data.servers || [];
+
+        renderServerTable(serverList);
+    } catch (error) {
+        console.error('加载服务器列表错误:', error);
+        showAlert('danger', '加载服务器列表失败，请刷新页面重试。', 'serverAlert');
     }
 }
 
@@ -1960,7 +2770,7 @@ async function moveServer(serverId, direction) {
 
     } catch (error) {
         console.error('移动服务器错误:', error);
-        showAlert('danger', \`移动服务器失败: \${error.message}\`);
+        showAlert('danger', \`移动服务器失败: \${error.message}\`, 'serverAlert');
     }
 }
 
@@ -2055,7 +2865,7 @@ async function saveServer() {
         }
     } catch (error) {
         console.error('保存服务器错误:', error);
-        showAlert('danger', '保存服务器失败，请稍后重试');
+        showAlert('danger', '保存服务器失败，请稍后重试', 'serverAlert');
     }
 }
 
@@ -2078,14 +2888,14 @@ async function viewApiKey(serverId) {
                 const serverWithKey = { ...server, api_key: data.api_key };
                 showApiKey(serverWithKey); // Pass the complete server object
             } else {
-                 showAlert('danger', '未找到服务器信息');
+                 showAlert('danger', '未找到服务器信息', 'serverAlert');
             }
         } else {
-            showAlert('danger', '获取API密钥失败');
+            showAlert('danger', '获取API密钥失败', 'serverAlert');
         }
     } catch (error) {
         console.error('查看API密钥错误:', error);
-        showAlert('danger', '获取API密钥失败，请稍后重试');
+        showAlert('danger', '获取API密钥失败，请稍后重试', 'serverAlert');
     }
 }
 
@@ -2136,9 +2946,39 @@ async function deleteServer(serverId) {
         showAlert('success', '服务器删除成功');
     } catch (error) {
         console.error('删除服务器错误:', error);
-        showAlert('danger', '删除服务器失败，请稍后重试');
+        showAlert('danger', '删除服务器失败，请稍后重试', 'serverAlert');
     }
 }
+
+
+// --- Site Monitoring Functions (Continued) ---
+
+// 移动网站顺序
+async function moveSite(siteId, direction) {
+    try {
+        const response = await fetch(\`/api/admin/sites/\${siteId}/reorder\`, {
+            method: 'POST',
+            headers: getAuthHeaders(),
+            body: JSON.stringify({ direction })
+        });
+
+        if (!response.ok) {
+             const errorData = await response.json().catch(() => ({}));
+             throw new Error(errorData.message || '移动网站失败');
+        }
+
+        // 重新加载列表以反映新顺序
+        await loadSiteList();
+        showAlert('success', \`网站已成功\${direction === 'up' ? '上移' : '下移'}\`, 'siteAlert');
+
+    } catch (error) {
+        console.error('移动网站错误:', error);
+        showAlert('danger', \`移动网站失败: \${error.message}\`, 'siteAlert');
+    }
+}
+
+
+// --- Password Management Functions ---
 
 // 显示密码修改模态框
 function showPasswordModal() {
@@ -2182,7 +3022,7 @@ async function changePassword() {
             const passwordModal = bootstrap.Modal.getInstance(document.getElementById('passwordModal'));
             passwordModal.hide();
             
-            showAlert('success', '密码修改成功');
+            showAlert('success', '密码修改成功', 'serverAlert'); // Use main alert
         } else {
             const data = await response.json();
             showPasswordAlert('danger', data.message || '密码修改失败');
@@ -2193,6 +3033,9 @@ async function changePassword() {
     }
 }
 
+
+// --- Auth Functions ---
+
 // 退出登录
 function logout() {
     // 清除localStorage中的token
@@ -2202,9 +3045,196 @@ function logout() {
     window.location.href = 'login.html';
 }
 
-// 显示警告信息
-function showAlert(type, message) {
-    const alertElement = document.getElementById('serverAlert');
+
+// --- Site Monitoring Functions ---
+
+// 加载监控网站列表
+async function loadSiteList() {
+    try {
+        const response = await fetch('/api/admin/sites', {
+            headers: getAuthHeaders()
+        });
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.message || '获取监控网站列表失败');
+        }
+        const data = await response.json();
+        siteList = data.sites || [];
+        renderSiteTable(siteList);
+    } catch (error) {
+        console.error('加载监控网站列表错误:', error);
+        showAlert('danger', \`加载监控网站列表失败: \${error.message}\`, 'siteAlert');
+    }
+}
+
+// 渲染监控网站表格
+function renderSiteTable(sites) {
+    const tableBody = document.getElementById('siteTableBody');
+    tableBody.innerHTML = '';
+
+    if (sites.length === 0) {
+        tableBody.innerHTML = '<tr><td colspan="8" class="text-center">暂无监控网站</td></tr>'; // Colspan updated
+        return;
+    }
+
+    sites.forEach((site, index) => { // Added index for sorting buttons
+        const row = document.createElement('tr');
+        const statusInfo = getSiteStatusBadge(site.last_status);
+        const lastCheckTime = site.last_checked ? new Date(site.last_checked * 1000).toLocaleString() : '从未';
+        const responseTime = site.last_response_time_ms !== null ? \`\${site.last_response_time_ms} ms\` : '-';
+
+        row.innerHTML = \`
+             <td>
+                <div class="btn-group">
+                     <button class="btn btn-sm btn-outline-secondary move-site-btn" data-id="\${site.id}" data-direction="up" \${index === 0 ? 'disabled' : ''}>
+                        <i class="bi bi-arrow-up"></i>
+                    </button>
+                     <button class="btn btn-sm btn-outline-secondary move-site-btn" data-id="\${site.id}" data-direction="down" \${index === sites.length - 1 ? 'disabled' : ''}>
+                        <i class="bi bi-arrow-down"></i>
+                    </button>
+                </div>
+            </td>
+            <td>\${site.name || '-'}</td>
+            <td><a href="\${site.url}" target="_blank" rel="noopener noreferrer">\${site.url}</a></td>
+            <td><span class="badge \${statusInfo.class}">\${statusInfo.text}</span></td>
+            <td>\${site.last_status_code || '-'}</td>
+            <td>\${responseTime}</td>
+            <td>\${lastCheckTime}</td>
+            <td>
+                <button class="btn btn-sm btn-outline-danger delete-site-btn" data-id="\${site.id}" data-name="\${site.name || site.url}" data-url="\${site.url}">
+                    <i class="bi bi-trash"></i>
+                </button>
+            </td>
+        \`;
+        tableBody.appendChild(row);
+    });
+
+    // Add event listeners for delete buttons
+    document.querySelectorAll('.delete-site-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const siteId = this.getAttribute('data-id');
+            const siteName = this.getAttribute('data-name');
+            const siteUrl = this.getAttribute('data-url');
+            showDeleteSiteConfirmation(siteId, siteName, siteUrl);
+        });
+    });
+
+    // Add event listeners for move buttons
+    document.querySelectorAll('.move-site-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const siteId = this.getAttribute('data-id');
+            const direction = this.getAttribute('data-direction');
+            moveSite(siteId, direction); // Call the moveSite function (to be added next)
+        });
+    });
+}
+
+// 获取网站状态对应的Badge样式和文本
+function getSiteStatusBadge(status) {
+    switch (status) {
+        case 'UP': return { class: 'bg-success', text: '正常' };
+        case 'DOWN': return { class: 'bg-danger', text: '故障' };
+        case 'TIMEOUT': return { class: 'bg-warning text-dark', text: '超时' };
+        case 'ERROR': return { class: 'bg-danger', text: '错误' };
+        case 'PENDING': return { class: 'bg-secondary', text: '待检测' };
+        default: return { class: 'bg-secondary', text: '未知' };
+    }
+}
+
+
+// 显示添加/编辑网站模态框
+function showSiteModal() {
+    document.getElementById('siteForm').reset();
+    document.getElementById('siteId').value = ''; // Ensure ID is cleared for add mode
+    document.getElementById('siteModalTitle').textContent = '添加监控网站';
+    const siteModal = new bootstrap.Modal(document.getElementById('siteModal'));
+    siteModal.show();
+}
+
+// 保存网站（添加）
+async function saveSite() {
+    const siteName = document.getElementById('siteName').value.trim();
+    const siteUrl = document.getElementById('siteUrl').value.trim();
+
+    if (!siteUrl) {
+        showAlert('warning', '请输入网站URL', 'siteAlert');
+        return;
+    }
+
+    // Basic URL validation (can be improved)
+    if (!siteUrl.startsWith('http://') && !siteUrl.startsWith('https://')) {
+         showAlert('warning', 'URL必须以 http:// 或 https:// 开头', 'siteAlert');
+         return;
+    }
+
+
+    try {
+        const response = await fetch('/api/admin/sites', {
+            method: 'POST',
+            headers: getAuthHeaders(),
+            body: JSON.stringify({ url: siteUrl, name: siteName })
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.message || \`添加网站失败 (\${response.status})\`);
+        }
+
+        // Hide modal and reload list
+        const siteModal = bootstrap.Modal.getInstance(document.getElementById('siteModal'));
+        siteModal.hide();
+        await loadSiteList(); // Reload the list to show the new site
+        showAlert('success', '监控网站添加成功', 'siteAlert');
+
+    } catch (error) {
+        console.error('保存网站错误:', error);
+        showAlert('danger', \`保存网站失败: \${error.message}\`, 'siteAlert');
+    }
+}
+
+// 显示删除网站确认模态框
+function showDeleteSiteConfirmation(siteId, siteName, siteUrl) {
+    currentSiteId = siteId;
+    document.getElementById('deleteSiteName').textContent = siteName;
+    document.getElementById('deleteSiteUrl').textContent = siteUrl;
+    const deleteModal = new bootstrap.Modal(document.getElementById('deleteSiteModal'));
+    deleteModal.show();
+}
+
+
+// 删除网站监控
+async function deleteSite(siteId) {
+    try {
+        const response = await fetch(\`/api/admin/sites/\${siteId}\`, {
+            method: 'DELETE',
+            headers: getAuthHeaders()
+        });
+
+        if (!response.ok) {
+             const errorData = await response.json().catch(() => ({}));
+             throw new Error(errorData.message || \`删除网站失败 (\${response.status})\`);
+        }
+
+        // Hide modal and reload list
+        const deleteModal = bootstrap.Modal.getInstance(document.getElementById('deleteSiteModal'));
+        deleteModal.hide();
+        await loadSiteList(); // Reload list
+        showAlert('success', '网站监控已删除', 'siteAlert');
+        currentSiteId = null; // Reset current ID
+
+    } catch (error) {
+        console.error('删除网站错误:', error);
+        showAlert('danger', \`删除网站失败: \${error.message}\`, 'siteAlert');
+    }
+}
+
+
+// --- Utility Functions ---
+
+// 显示警告信息 (specify alert element ID)
+function showAlert(type, message, alertId = 'serverAlert') {
+    const alertElement = document.getElementById(alertId);
+    if (!alertElement) return; // Exit if alert element doesn't exist
     alertElement.className = \`alert alert-\${type}\`;
     alertElement.textContent = message;
     alertElement.classList.remove('d-none');
@@ -2215,11 +3245,13 @@ function showAlert(type, message) {
     }, 5000);
 }
 
-// 显示密码修改警告信息
+// 显示密码修改警告信息 (uses its own dedicated alert element)
 function showPasswordAlert(type, message) {
     const alertElement = document.getElementById('passwordAlert');
+    if (!alertElement) return;
     alertElement.className = \`alert alert-\${type}\`;
     alertElement.textContent = message;
     alertElement.classList.remove('d-none');
+    // Auto-hide not typically needed for modal alerts, but can be added if desired
 }`;
 }
