@@ -153,8 +153,15 @@ curl -O https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/cf-vps-m
 
 1.  登录后台后，你应该会看到管理界面。
 2.  点击`添加监控网站`。
-3.  输入`网站名称（可选）`和`网站URL`。
+3.  输入`网站名称（可选）`和`网站URL(https://example.com)`。
 4.  点击`保存`。
+
+### 6. 配置Telegram 通知
+
+1.  BotFather创建bot并获取`Bot Token`。
+2.  `@userinfobot`获取自己的`ID`。
+3.  将上述两项分别填入。
+4.  启用通知，点击`保存Telegram设置`。
 
 ## 注意事项
 
