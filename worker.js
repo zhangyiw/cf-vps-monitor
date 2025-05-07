@@ -916,6 +916,23 @@ async function handleApiRequest(request, env, ctx) { // Added ctx
         sort_order: nextSortOrder
         // Removed enable_frequent_down_notifications
       };
+
+      // Immediately perform a health check for the new site
+      const newSiteForCheck = {
+        id: siteId,
+        url: url,
+        name: name || ''
+      };
+      // Use ctx.waitUntil to perform the check without blocking the response
+      if (ctx && typeof ctx.waitUntil === 'function') {
+        ctx.waitUntil(checkWebsiteStatus(newSiteForCheck, env.DB, ctx));
+        console.log(`Scheduled immediate health check for new site: ${siteId} (${url})`);
+      } else {
+        // Fallback if ctx.waitUntil is not available (e.g., local testing without full CF environment)
+        console.warn("ctx.waitUntil not available for immediate site check. Attempting direct call (may block).");
+        checkWebsiteStatus(newSiteForCheck, env.DB, ctx).catch(e => console.error("Error during direct immediate site check:", e));
+      }
+
       return new Response(JSON.stringify({ site: siteData }), {
         status: 201, headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
