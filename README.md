@@ -4,11 +4,12 @@
 
 前端：
 
-![image](https://github.com/user-attachments/assets/9f082014-e32d-484f-b954-db652d7bd275)
+![image](https://github.com/user-attachments/assets/382019b3-93de-4a6a-9f3f-83410fb89bd4)
+![image](https://github.com/user-attachments/assets/7a8a37ee-3be1-4bf4-952f-cd200efb50f4)
 
 后台：
 
-![image](https://github.com/user-attachments/assets/de305d42-3e5f-44ae-bb17-f40b5d4e26e8)
+![image](https://github.com/user-attachments/assets/1aa00797-0999-4a23-90d9-18c737fa7d77)
 
 VPS端：
 
