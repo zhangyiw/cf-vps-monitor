@@ -129,7 +129,7 @@ Worker 需要访问你之前创建的 D1 数据库。
 Agent 是一个需要在你的 VPS 上运行的脚本，用于收集状态信息并发送回面板。
 下载脚本并运行：
 ```
-wget https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/enhanced-install.sh -O cf-vps-monitor.sh && chmod +x cf-vps-monitor.sh && ./cf-vps-monitor.sh
+wget https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/cf-vps-monitor.sh -O cf-vps-monitor.sh && chmod +x cf-vps-monitor.sh && ./cf-vps-monitor.sh
 ```
 或者：
 ```
