@@ -1119,8 +1119,8 @@ async function handleApiRequest(request, env, ctx) { // Added ctx
   if (path === '/api/sites/status' && method === 'GET') {
      try {
       // Select necessary fields for public view (NO URL)
-      // Order by name for public view consistency
-      const stmt = env.DB.prepare('SELECT id, name, last_checked, last_status, last_status_code, last_response_time_ms FROM monitored_sites ORDER BY name ASC, id ASC');
+      // Order by sort_order, then name for public view consistency
+      const stmt = env.DB.prepare('SELECT id, name, last_checked, last_status, last_status_code, last_response_time_ms FROM monitored_sites ORDER BY sort_order ASC NULLS LAST, name ASC, id ASC');
       const { results } = await stmt.all();
       return new Response(JSON.stringify({ sites: results || [] }), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2734,6 +2734,49 @@ body {
     background-color: #90ee90 !important; /* LightGreen */
 }
 
+/* Custom styles for non-disruptive alerts in admin page */
+#serverAlert, #siteAlert {
+    position: fixed !important; /* Use !important to override Bootstrap if necessary */
+    top: 70px; /* Below navbar */
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1055; /* Higher than Bootstrap modals (1050) */
+    padding: 0.75rem 1.25rem;
+    /* margin-bottom: 1rem; /* Not needed for fixed */
+    border: 1px solid transparent;
+    border-radius: 0.25rem;
+    min-width: 300px; /* Minimum width */
+    max-width: 90%; /* Max width */
+    text-align: center;
+    box-shadow: 0 0.5rem 1rem rgba(0,0,0,0.15);
+    /* Ensure d-none works to hide them, !important might be needed if Bootstrap's .alert.d-none is too specific */
+}
+
+#serverAlert.d-none, #siteAlert.d-none {
+    display: none !important;
+}
+
+/* Semi-transparent backgrounds for different alert types */
+/* Light Theme Overrides for fixed alerts */
+#serverAlert.alert-success, #siteAlert.alert-success {
+    color: #0f5132; /* Bootstrap success text color */
+    background-color: rgba(209, 231, 221, 0.95) !important; /* Semi-transparent success, !important for specificity */
+    border-color: rgba(190, 221, 208, 0.95) !important;
+}
+
+#serverAlert.alert-danger, #siteAlert.alert-danger {
+    color: #842029; /* Bootstrap danger text color */
+    background-color: rgba(248, 215, 218, 0.95) !important; /* Semi-transparent danger */
+    border-color: rgba(245, 198, 203, 0.95) !important;
+}
+
+#serverAlert.alert-warning, #siteAlert.alert-warning { /* For siteAlert if it uses warning */
+    color: #664d03; /* Bootstrap warning text color */
+    background-color: rgba(255, 243, 205, 0.95) !important; /* Semi-transparent warning */
+    border-color: rgba(255, 238, 186, 0.95) !important;
+}
+
+
     [data-bs-theme="dark"] {
         body {
             background-color: #121212; /* 深色背景 */
@@ -2827,6 +2870,28 @@ body {
         }
         a:hover {
             color: #a9c9fc;
+        }
+
+        /* Dark Theme Overrides for fixed alerts */
+        [data-bs-theme="dark"] #serverAlert.alert-success,
+        [data-bs-theme="dark"] #siteAlert.alert-success {
+            color: #75b798; /* Lighter green text for dark theme */
+            background-color: rgba(40, 167, 69, 0.85) !important; /* Darker semi-transparent success */
+            border-color: rgba(34, 139, 57, 0.85) !important;
+        }
+
+        [data-bs-theme="dark"] #serverAlert.alert-danger,
+        [data-bs-theme="dark"] #siteAlert.alert-danger {
+            color: #ea868f; /* Lighter red text for dark theme */
+            background-color: rgba(220, 53, 69, 0.85) !important; /* Darker semi-transparent danger */
+            border-color: rgba(187, 45, 59, 0.85) !important;
+        }
+        
+        [data-bs-theme="dark"] #serverAlert.alert-warning,
+        [data-bs-theme="dark"] #siteAlert.alert-warning {
+            color: #ffd373; /* Lighter yellow text for dark theme */
+            background-color: rgba(255, 193, 7, 0.85) !important; /* Darker semi-transparent warning */
+            border-color: rgba(217, 164, 6, 0.85) !important;
         }
     }
 `;
@@ -3876,7 +3941,7 @@ async function moveServer(serverId, direction) {
 
         // 重新加载列表以反映新顺序
         await loadServerList();
-        showAlert('success', \`服务器已成功\${direction === 'up' ? '上移' : '下移'}\`);
+        showAlert('success', '服务器已成功' + (direction === 'up' ? '上移' : '下移'));
 
     } catch (error) {
         console.error('移动服务器错误:', error);
@@ -4094,7 +4159,7 @@ async function moveSite(siteId, direction) {
 
         // 重新加载列表以反映新顺序
         await loadSiteList();
-        showAlert('success', \`网站已成功\${direction === 'up' ? '上移' : '下移'}\`, 'siteAlert');
+        showAlert('success', '网站已成功' + (direction === 'up' ? '上移' : '下移'), 'siteAlert');
 
     } catch (error) {
         console.error('移动网站错误:', error);
