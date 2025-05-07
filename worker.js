@@ -2739,6 +2739,19 @@ body {
     font-weight: 600;
 }
 
+/* Modal centering and light theme transparency */
+.modal-dialog {
+    display: flex;
+    align-items: center;
+    min-height: calc(100% - 1rem); /* Adjust as needed */
+}
+
+.modal-content {
+    background-color: rgba(255, 255, 255, 0.9); /* Semi-transparent white for light theme */
+    /* backdrop-filter: blur(5px); /* Optional: adds a blur effect to content behind modal */
+}
+
+
 /* 响应式调整 */
 @media (max-width: 768px) {
     .chart-container {
@@ -2752,7 +2765,7 @@ body {
 }
 
 /* Custom styles for non-disruptive alerts in admin page */
-#serverAlert, #siteAlert {
+#serverAlert, #siteAlert, #telegramSettingsAlert {
     position: fixed !important; /* Use !important to override Bootstrap if necessary */
     top: 70px; /* Below navbar */
     left: 50%;
@@ -2769,25 +2782,25 @@ body {
     /* Ensure d-none works to hide them, !important might be needed if Bootstrap's .alert.d-none is too specific */
 }
 
-#serverAlert.d-none, #siteAlert.d-none {
+#serverAlert.d-none, #siteAlert.d-none, #telegramSettingsAlert.d-none {
     display: none !important;
 }
 
 /* Semi-transparent backgrounds for different alert types */
 /* Light Theme Overrides for fixed alerts */
-#serverAlert.alert-success, #siteAlert.alert-success {
+#serverAlert.alert-success, #siteAlert.alert-success, #telegramSettingsAlert.alert-success {
     color: #0f5132; /* Bootstrap success text color */
     background-color: rgba(209, 231, 221, 0.95) !important; /* Semi-transparent success, !important for specificity */
     border-color: rgba(190, 221, 208, 0.95) !important;
 }
 
-#serverAlert.alert-danger, #siteAlert.alert-danger {
+#serverAlert.alert-danger, #siteAlert.alert-danger, #telegramSettingsAlert.alert-danger {
     color: #842029; /* Bootstrap danger text color */
     background-color: rgba(248, 215, 218, 0.95) !important; /* Semi-transparent danger */
     border-color: rgba(245, 198, 203, 0.95) !important;
 }
 
-#serverAlert.alert-warning, #siteAlert.alert-warning { /* For siteAlert if it uses warning */
+#serverAlert.alert-warning, #siteAlert.alert-warning, #telegramSettingsAlert.alert-warning { /* For siteAlert if it uses warning */
     color: #664d03; /* Bootstrap warning text color */
     background-color: rgba(255, 243, 205, 0.95) !important; /* Semi-transparent warning */
     border-color: rgba(255, 238, 186, 0.95) !important;
@@ -2831,8 +2844,9 @@ body {
         }
 
         .modal-content {
-            background-color: #1e1e1e;
+            background-color: rgba(30, 30, 30, 0.9); /* Semi-transparent dark grey for dark theme */
             color: #e0e0e0;
+            /* backdrop-filter: blur(5px); /* Optional: adds a blur effect to content behind modal */
         }
 
         .modal-header {
@@ -2891,21 +2905,24 @@ body {
 
         /* Dark Theme Overrides for fixed alerts */
         [data-bs-theme="dark"] #serverAlert.alert-success,
-        [data-bs-theme="dark"] #siteAlert.alert-success {
+        [data-bs-theme="dark"] #siteAlert.alert-success,
+        [data-bs-theme="dark"] #telegramSettingsAlert.alert-success {
             color: #75b798; /* Lighter green text for dark theme */
             background-color: rgba(40, 167, 69, 0.85) !important; /* Darker semi-transparent success */
             border-color: rgba(34, 139, 57, 0.85) !important;
         }
 
         [data-bs-theme="dark"] #serverAlert.alert-danger,
-        [data-bs-theme="dark"] #siteAlert.alert-danger {
+        [data-bs-theme="dark"] #siteAlert.alert-danger,
+        [data-bs-theme="dark"] #telegramSettingsAlert.alert-danger {
             color: #ea868f; /* Lighter red text for dark theme */
             background-color: rgba(220, 53, 69, 0.85) !important; /* Darker semi-transparent danger */
             border-color: rgba(187, 45, 59, 0.85) !important;
         }
         
         [data-bs-theme="dark"] #serverAlert.alert-warning,
-        [data-bs-theme="dark"] #siteAlert.alert-warning {
+        [data-bs-theme="dark"] #siteAlert.alert-warning,
+        [data-bs-theme="dark"] #telegramSettingsAlert.alert-warning {
             color: #ffd373; /* Lighter yellow text for dark theme */
             background-color: rgba(255, 193, 7, 0.85) !important; /* Darker semi-transparent warning */
             border-color: rgba(217, 164, 6, 0.85) !important;
@@ -4546,12 +4563,20 @@ async function loadTelegramSettings() {
 async function saveTelegramSettings() {
     const botToken = document.getElementById('telegramBotToken').value.trim();
     const chatId = document.getElementById('telegramChatId').value.trim();
-    const enableNotifications = document.getElementById('enableTelegramNotifications').checked;
+    let enableNotifications = document.getElementById('enableTelegramNotifications').checked;
 
-    if (enableNotifications && (!botToken || !chatId)) {
+    // If Bot Token or Chat ID is empty, automatically disable notifications
+    if (!botToken || !chatId) {
+        enableNotifications = false;
+        document.getElementById('enableTelegramNotifications').checked = false; // Update the checkbox UI
+        if (document.getElementById('enableTelegramNotifications').checked && (botToken || chatId)) { // Only show warning if user intended to enable
+             showAlert('warning', 'Bot Token 和 Chat ID 均不能为空才能启用通知。通知已自动禁用。', 'telegramSettingsAlert');
+        }
+    } else if (enableNotifications && (!botToken || !chatId)) { // This case should ideally not be hit due to above logic, but kept for safety
         showAlert('warning', '启用通知时，Bot Token 和 Chat ID 不能为空。', 'telegramSettingsAlert');
         return;
     }
+
 
     try {
         const response = await fetch('/api/admin/telegram-settings', {
@@ -4560,7 +4585,7 @@ async function saveTelegramSettings() {
             body: JSON.stringify({
                 bot_token: botToken,
                 chat_id: chatId,
-                enable_notifications: enableNotifications
+                enable_notifications: enableNotifications // Use the potentially modified value
             })
         });
 
