@@ -100,7 +100,7 @@ Worker 需要访问你之前创建的 D1 数据库。
 1.  在 Worker 的管理页面选择 `设置` 标签页。
 2.  在设置页面中，选择 `触发事件` 子菜单。
 3.  点击`添加`，选择`Cron触发器`。
-4.  选择`计划`，执行 Worker 的频率选择`分钟`，下面的框填入10（即每10分钟检测一次网站），随自己喜好填写。
+4.  选择`计划`，执行 Worker 的频率选择`小时`，下面的框填入1（即每整点检测一次网站）。
 5.  点击`添加`。
 
 ### 5. 访问面板
@@ -108,7 +108,7 @@ Worker 需要访问你之前创建的 D1 数据库。
 部署和绑定完成后，你的监控面板应该可以通过 Worker 的 URL 访问了。
 
 *   返回 Worker 的概览页面（点击 Worker 名称）。
-*   你会看到一个 `.workers.dev` 的 URL，例如 `https://vps-monitor-worker.your-subdomain.workers.dev`。
+*   在设置页面你会看到一个 `.workers.dev` 的 URL，例如 `vps-monitor.abo-vendor289.workers.dev`。
 *   在浏览器中打开这个 URL，你应该能看到监控面板的前端界面。
 
 ## 使用面板
@@ -120,19 +120,20 @@ Worker 需要访问你之前创建的 D1 数据库。
 3.  使用默认凭据登录：
     *   用户名: `admin`
     *   密码: `admin`
-4.  登录后，建议立即修改密码（如果前端支持此功能，或通过直接操作 D1 数据库）。
+4.  登录后，建议立即修改密码。
 
 ### 2. 添加服务器
 
 1.  登录后台后，你应该会看到管理界面。
-2.  找到添加服务器的选项（通常是一个表单）。
+2.  找到添加服务器的选项。
 3.  输入服务器的名称和可选的描述。
-4.  点击 `添加` 或 `保存`。
+4.  点击 `保存`。
 5.  面板会自动生成一个唯一的 `服务器 ID` 和 `API 密钥`。**请记下这个 服务器ID 和 API 密钥**，部署 Agent 时需要用到。
 
 ### 3. 部署 Agent (探针)
 
 Agent 是一个需要在你的 VPS 上运行的脚本，用于收集状态信息并发送回面板。
+
 下载脚本并运行：
 ```
 wget https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/cf-vps-monitor.sh -O cf-vps-monitor.sh && chmod +x cf-vps-monitor.sh && ./cf-vps-monitor.sh
@@ -142,18 +143,19 @@ wget https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/cf-vps-moni
 curl -O https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/cf-vps-monitor.sh && chmod +x cf-vps-monitor.sh && ./cf-vps-monitor.sh
 ```
 安装需要 `API密钥` `服务器ID` 和 你的`worker网址`
-按照提示输入安装完成后，Agent 会开始定期向你的面板发送数据。你应该能在面板上看到对应服务器的状态更新。
+按照提示输入安装完成后，Agent 会开始定期(60s)向你的面板发送数据。你应该能在面板上看到对应服务器的状态更新。
 
 ### 4. Agent 管理
 
 安装脚本本身也提供了管理功能：
 
-*   **启动服务:** 
-*   **停止服务:** 
-*   **重启服务:** 
+*   **安装服务:** 
+*   **卸载服务:** 
 *   **查看状态:** 
 *   **查看日志:** 
-*   **卸载服务:** 
+*   **停止服务:**
+*   **重启服务:**
+*   **修改配置:**
 
 ### 5. 添加检测网站
 
