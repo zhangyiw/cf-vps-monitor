@@ -2,11 +2,17 @@
 ## 用cloudflare worker搭建的vps探针面板（所有内容和代码均为AI生成，出现问题请直接拿着代码找AI吧）
 面板示例：https://vps-monitor.abo-vendor289.workers.dev/
 
-前端：![image](https://github.com/user-attachments/assets/9f082014-e32d-484f-b954-db652d7bd275)
+前端：
 
-后台：![image](https://github.com/user-attachments/assets/de305d42-3e5f-44ae-bb17-f40b5d4e26e8)
+![image](https://github.com/user-attachments/assets/9f082014-e32d-484f-b954-db652d7bd275)
 
-VPS端：![image](https://github.com/user-attachments/assets/c0d92ab4-7e9f-4f57-b255-740b6c281926)
+后台：
+
+![image](https://github.com/user-attachments/assets/de305d42-3e5f-44ae-bb17-f40b5d4e26e8)
+
+VPS端：
+
+![image](https://github.com/user-attachments/assets/d10a83f2-17c1-4523-8f79-03bb1ce77e1f)
 
 
 # VPS 监控面板 (Cloudflare Worker + D1 版) - 部署指南
