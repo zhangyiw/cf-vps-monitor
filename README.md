@@ -117,7 +117,7 @@ Worker 需要访问你之前创建的 D1 数据库。
 ### 1. 初始登录
 
 1.  访问你的 Worker URL。
-2.  点击页面右上角的 `登录` 或直接访问 `/login` 路径 (例如 `https://<你的Worker地址>/login`)。
+2.  点击页面右上角的 `登录` 或直接访问 `/login` 路径 (例如 `https://vps-monitor.abo-vendor289.workers.dev/login`)。
 3.  使用默认凭据登录：
     *   用户名: `admin`
     *   密码: `admin`
@@ -162,7 +162,7 @@ curl -O https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/cf-vps-m
 
 1.  登录后台后，你应该会看到管理界面。
 2.  点击`添加监控网站`。
-3.  输入`网站名称（可选）`和`网站URL(https://example.com)`。
+3.  输入`网站名称（可选）`和`网站URL 如(https://example.com)`。
 4.  点击`保存`。
 
 ### 6. 配置Telegram 通知
