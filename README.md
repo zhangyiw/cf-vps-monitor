@@ -74,7 +74,7 @@ VPS端：
 
 接下来，创建 Worker 并将代码部署上去。
 
-1.  在左侧菜单中，点击 `Workers & Pages`。
+1.  在左侧菜单中，点击 `计算(Workers)`，选择 `Workers & Pages`。
 2.  在概览页面，点击 `创建`。
 3.  选择 `Start with Hello World!`点击`开始使用`。
 4.  为你的 Worker 命名（例如 `vps-monitor-worker`），确保名称可用。
@@ -108,7 +108,6 @@ Worker 需要访问你之前创建的 D1 数据库。
 
 部署和绑定完成后，你的监控面板应该可以通过 Worker 的 URL 访问了。
 
-*   返回 Worker 的概览页面（点击 Worker 名称）。
 *   在设置页面你会看到一个 `.workers.dev` 的 URL，例如 `vps-monitor.abo-vendor289.workers.dev`。
 *   在浏览器中打开这个 URL，你应该能看到监控面板的前端界面。
 
@@ -143,8 +142,9 @@ wget https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/cf-vps-moni
 ```
 curl -O https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/cf-vps-monitor.sh && chmod +x cf-vps-monitor.sh && ./cf-vps-monitor.sh
 ```
-安装需要 `API密钥` `服务器ID` 和 你的`worker网址`
-按照提示输入安装完成后，Agent 会开始定期(60s)向你的面板发送数据。你应该能在面板上看到对应服务器的状态更新。
+*   安装需要 `API密钥` `服务器ID` 和 你的 `worker网址`
+*   可以在后台点击 `查看密钥` 来获取上述三个参数
+*   按照提示输入安装完成后，Agent 会开始定期(60s)向你的面板发送数据。你应该能在面板上看到对应服务器的状态更新。
 
 ### 4. Agent 管理
 
