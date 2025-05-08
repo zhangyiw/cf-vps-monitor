@@ -1341,7 +1341,7 @@ async function checkWebsiteStatus(site, db, ctx) { // Added ctx for waitUntil
     newResponseTime = Date.now() - startTime;
     newStatusCode = response.status;
 
-    if (response.ok || (response.status >= 300 && response.status < 400)) {
+    if (response.ok || (response.status >= 300 && response.status < 500)) { // 2xx, 3xx, and 4xx are considered UP
       newStatus = 'UP';
     } else {
       newStatus = 'DOWN';
