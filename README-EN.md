@@ -1,4 +1,5 @@
 # cf-vps-monitor
+[简体中文](https://github.com/kadidalax/cf-vps-monitor/blob/main/README.md) | [English](https://github.com/kadidalax/cf-vps-monitor/blob/main/README-EN.md)
 ## A VPS probe + website monitoring panel built with Cloudflare Workers.
 Panel Demo: https://vps-monitor.abo-vendor289.workers.dev/
 
