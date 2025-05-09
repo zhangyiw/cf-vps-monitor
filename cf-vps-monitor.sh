@@ -102,9 +102,10 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
 }
 
-# 获取CPU使用率
+# 获取CPU使用率，更新CPU使用率获取方法
 get_cpu_usage() {
-    cpu_usage=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\\([0-9.]*\\)%* id.*/\\1/" | awk '{print 100 - $1}')
+    #cpu_usage=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\\([0-9.]*\\)%* id.*/\\1/" | awk '{print 100 - $1}')
+    cpu_usage=$(grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {printf "%.1f\n", usage}')
     cpu_load=$(cat /proc/loadavg | awk '{print $1","$2","$3}')
     echo "{\"usage_percent\":$cpu_usage,\"load_avg\":[$cpu_load]}"
 }
